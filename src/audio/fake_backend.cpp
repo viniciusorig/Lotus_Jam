@@ -33,14 +33,14 @@ bool FakeBackend::start(std::string& err) {
     failed_.store(false, std::memory_order_relaxed);
     xruns_.store(0, std::memory_order_relaxed);
     dropped_.store(0, std::memory_order_relaxed);
-    dropBegin_ = dropEnd_ = 0;
-    const int64_t dropAt = std::llround((dropAtSec_ - t0_ + o_.inputLatencySec) * kSampleRate);
-    if (dropFrames_ > 0 && dropAt >= 0) {
-        dropBegin_ = dropAt;
-        const int64_t last = dropBegin_ + int64_t(dropFrames_) - 1;
-        dropEnd_ = (last / int64_t(kBlock) + 1) * int64_t(kBlock);
+    winCount_ = 0;
+    for (size_t i = 0; i < dropCount_; ++i) {
+        const int64_t at = std::llround((dropReq_[i].atSec - t0_ + o_.inputLatencySec) * kSampleRate);
+        if (at < 0) continue;
+        const int64_t last = at + int64_t(dropReq_[i].frames) - 1;
+        dropWin_[winCount_++] = {at, (last / int64_t(kBlock) + 1) * int64_t(kBlock)};
     }
-    dropFrames_ = 0;  // one-shot
+    dropCount_ = 0;  // one-shot
     stopReq_.store(false, std::memory_order_relaxed);
     captured_.clear();  // keeps the reserved capacity
     running_ = true;
@@ -153,7 +153,9 @@ void FakeBackend::run() {
         renderInput(in_.data(), kBlock, first);
         const int64_t end = first + int64_t(kBlock);
         size_t allowed = kBlock;
-        if (end > dropBegin_ && first < dropEnd_) allowed = size_t(std::max<int64_t>(0, dropBegin_ - first));
+        for (size_t w = 0; w < winCount_; ++w)
+            if (end > dropWin_[w].begin && first < dropWin_[w].end)
+                allowed = std::min(allowed, size_t(std::max<int64_t>(0, dropWin_[w].begin - first)));
         const size_t written = input_.write(in_.data(), allowed);
         if (written < kBlock) {
             dropped_.fetch_add(kBlock - written, std::memory_order_release);

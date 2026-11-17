@@ -314,7 +314,7 @@ void Session::scoringLoop() {
     int64_t nextBeat = 0;
     double lastRefresh = -std::numeric_limits<double>::infinity();
     double lastWarn = -std::numeric_limits<double>::infinity();
-    uint64_t warnedDropped = 0;
+    uint64_t warnedDropped = 0, warnedEvictions = 0;
     bool dirty = true;
     auto emit = [this](UiEvent::Type t, int64_t n, double a, double b) {
         UiEvent e;
@@ -347,18 +347,24 @@ void Session::scoringLoop() {
             for (size_t i = 0; i < n; ++i) inTimeline_->add(tp[i], dropped);
         }
         const uint64_t dropped = backend_->inputDroppedFrames();
-        if (dropped > warnedDropped) {
-            // One Warning per overload episode: drops within 5 s of the last Warning are
-            // covered by it.
+        const uint64_t evictions = inTimeline_->evictions();
+        if (dropped > warnedDropped || evictions > warnedEvictions) {
+            // One Warning per overload episode: drops (or evicted timeline segments) within 5 s
+            // of the last Warning are covered by it. A Warning that could not be queued (queue
+            // full) covers nothing: it is retried on the next tick.
             const double now = backend_->nowSec();
+            bool covered = true;
             if (now - lastWarn >= kWarnEverySec) {
                 UiEvent w;
                 w.type = UiEvent::Warning;
                 w.text = kOverloadText;
-                pushScoring(w, false);
+                covered = pushScoring(w, false);
             }
-            lastWarn = now;
-            warnedDropped = dropped;
+            if (covered) {
+                lastWarn = now;
+                warnedDropped = dropped;
+                warnedEvictions = evictions;
+            }
         }
         while ((n = backend_->outputTimes().read(tp.data(), tp.size())) > 0)
             for (size_t i = 0; i < n; ++i) outMap_->add(tp[i]);
@@ -381,8 +387,11 @@ void Session::scoringLoop() {
             if (ready) {
                 // "Now" for finalisation = capture time of the last analysed frame, so a slot
                 // is never finalised before its onset could have been analysed.
+                // A refused (NaN) time only happens after a segment eviction: skip this tick
+                // rather than finalise slots from a guessed time.
                 misses.clear();
-                scorer_->advance(inTimeline_->timeOf(double(analysed)), misses);
+                const double nowCapture = inTimeline_->timeOf(double(analysed));
+                if (std::isfinite(nowCapture)) scorer_->advance(nowCapture, misses);
                 for (const auto& m : misses) emit(UiEvent::Miss, m.slot, 0.0, 0.0);
                 dirty = dirty || !misses.empty();
             }
@@ -402,6 +411,8 @@ void Session::scoringLoop() {
                 dirty = false;
             }
         }
+        // Segments behind the analysis are no longer needed (memory stays bounded).
+        inTimeline_->prune(analysedFrames_.load(std::memory_order_acquire));
         std::this_thread::sleep_for(kScoringTick);
     }
     refreshSummary();

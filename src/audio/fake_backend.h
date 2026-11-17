@@ -66,12 +66,13 @@ public:
     void scheduleNote(double tSec, double hz, double amp);
     // Test hook: input produced from capture time atSec on is discarded as if the input ring
     // were full, for `frames` frames extended to the end of the block they end in (like a full
-    // ring, which keeps the head of a block and drops the rest). Call only while stopped; it
-    // applies to the next start() only (a time before that stream's start is ignored).
+    // ring, which keeps the head of a block and drops the rest). May be called several times
+    // (up to kMaxDrops windows; more are ignored). Call only while stopped; the windows apply
+    // to the next start() only (a window before that stream's start is ignored).
     void dropInput(double atSec, size_t frames) {
-        dropAtSec_ = atSec;
-        dropFrames_ = frames;
+        if (dropCount_ < kMaxDrops && frames > 0) dropReq_[dropCount_++] = {atSec, frames};
     }
+    static constexpr size_t kMaxDrops = 1024;
     // The device "disappears": the driver stops delivering data and failed() becomes true
     // until the next start().
     void simulateFailure() { failed_.store(true, std::memory_order_release); }
@@ -102,9 +103,16 @@ private:
     std::atomic<bool> failed_{false};
     std::atomic<uint32_t> xruns_{0};
     std::atomic<uint64_t> dropped_{0};
-    double dropAtSec_ = 0.0;
-    size_t dropFrames_ = 0;
-    int64_t dropBegin_ = 0, dropEnd_ = 0;  // produced-frame range, set by start()
+    struct DropReq {
+        double atSec;
+        size_t frames;
+    };
+    struct DropWin {
+        int64_t begin, end;  // produced frames [begin, end), end on a block boundary
+    };
+    std::array<DropReq, kMaxDrops> dropReq_{};
+    std::array<DropWin, kMaxDrops> dropWin_{};
+    size_t dropCount_ = 0, winCount_ = 0;  // set while stopped, read by the driver
     std::atomic<double> now_;
     double t0_ = 0.0;  // written by start() before the driver runs
     uint64_t rng_;

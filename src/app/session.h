@@ -43,7 +43,9 @@ struct SessionConfig {
 //   Error:  text = pt-BR message.
 //   Stopped: emitted exactly once per session end (stop() or device failure), and it is the
 //           last event of that session: pollEvents never delivers an event of that session
-//           after it, nor an event of the next session before it.
+//           after it, nor an event of the next session before it. Exception: the Error of a
+//           failed recordSample() WAV write comes from a writer thread that outlives the
+//           session, so it can arrive after that session's Stopped.
 //   Warning: text = pt-BR message for a non-fatal problem (input overload); the session goes on.
 struct UiEvent {
     enum Type { Beat, Note, Miss, Extra, Tuner, Level, Error, Stopped, Warning } type = Beat;
@@ -65,8 +67,10 @@ struct UiEvent {
 // Each worker thread has its own SPSC event queue (never blocks: Level/Tuner/other events
 // are dropped when full, a reserve keeps room for Error and Stopped); pollEvents drains both.
 // Dropped input (backend.inputDroppedFrames()) does not break the timing: the input timeline
-// is split at the gap (see InputTimeline) and one Warning is emitted per overload episode (an
-// episode ends after 5 s of backend time without drops). The OnsetDetector is not reset: its
+// is split at the gap (see InputTimeline; segments are pruned behind the analysed position,
+// and if its 64-segment cap is ever hit, onsets in evicted frames are dropped, never
+// mistimed) and one Warning is emitted per overload episode (an episode ends after 5 s of
+// backend time without drops or evictions). The OnsetDetector is not reset: its
 // sample indices stay in the written-frames domain (a note cut by the gap may be missed).
 //
 // start/stop/pollEvents/recordSample must be called from one controlling (UI) thread;

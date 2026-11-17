@@ -692,3 +692,105 @@ TEST(Session, StopDiscardsPendingRecording) {
     EXPECT_FALSE(std::filesystem::exists(path));
     std::filesystem::remove(path);
 }
+
+// ---------------------------------------------------------------- fix round 2: many gaps
+
+TEST(FakeBackend, SeveralDropWindows) {
+    FakeBackend::Options o;
+    o.speed = 50;
+    o.backpressure = true;
+    FakeBackend f(o);
+    const double t0 = f.nowSec();
+    // Windows that start 100 frames before a block end drop exactly those 100 frames.
+    for (int k = 0; k < 5; ++k)
+        f.dropInput(t0 - o.inputLatencySec + double((20 + 10 * k) * int64_t(FakeBackend::kBlock) - 100) / kSr, 100);
+    std::string err;
+    ASSERT_TRUE(f.start(err)) << err;
+    ASSERT_TRUE(waitUntil([&] { return f.nowSec() > t0 + 1.0; }));
+    f.stop();
+    EXPECT_EQ(f.inputDroppedFrames(), 5u * 100u);
+    std::vector<TimePoint> tp(1024);
+    tp.resize(f.inputTimes().read(tp.data(), tp.size()));
+    int jumps = 0;
+    for (size_t i = 1; i < tp.size(); ++i) {
+        const double gap = (tp[i].tSec - tp[i - 1].tSec) - double(tp[i].frame - tp[i - 1].frame) / kSr;
+        if (gap > 1e-6) {
+            ++jumps;
+            EXPECT_NEAR(gap, 100.0 / kSr, 1e-9);
+        }
+    }
+    EXPECT_EQ(jumps, 5);
+    std::vector<float> x(size_t(1) << 17);
+    EXPECT_EQ(int64_t(f.input().read(x.data(), x.size())), tp.back().frame);
+}
+
+TEST(Session, RepeatedDropsWhileAnalysisLagsKeepTiming) {
+    // Backpressure at a very high speed keeps the input ring full, so the analysis runs
+    // ~2.7 s (the ring) behind the TimePoints the scoring thread has already read. Every beat
+    // interval has 8 partial-block drops, so ~40 gaps lie between the analysis position and
+    // the head at any time: onsets must still map through their own segment.
+    FakeBackend::Options o;
+    o.speed = 1000;
+    o.backpressure = true;
+    o.noiseSigma = 0.002;
+    auto fake = std::make_unique<FakeBackend>(o);
+    FakeBackend* f = fake.get();
+    Session s(std::move(fake));
+    const SessionConfig cfg = training(120);
+    ClickScheduler cs(kSr, cfg.bpm, cfg.countIn);
+    const double t0 = f->nowSec();
+    std::vector<double> known;
+    for (int k = 0; k < 16; ++k) {
+        known.push_back(12.0 + jitterMs(k));
+        const double note = beatTime(cs, t0, cfg.countIn + k, o.outputLatencySec) + known.back() / 1000.0;
+        f->scheduleNote(note, 41.2, 0.3);
+        for (int j = 0; j < 8; ++j) f->dropInput(note + 0.12 + 0.035 * j, 100);  // in the decay
+    }
+    std::string err;
+    ASSERT_TRUE(s.start(cfg, err)) << err;
+    Collector c{s, {}};
+    ASSERT_TRUE(c.waitFor([&] { return c.slotsDone(18); }));
+    s.stop();
+    c.poll();
+    // Each window drops from its start to the end of its block: 100..579 frames.
+    EXPECT_GE(f->inputDroppedFrames(), 16u * 8u * 100u);
+    EXPECT_LT(f->inputDroppedFrames(), 16u * 8u * 580u);
+    int notes = 0;
+    for (const auto& e : c.of(UiEvent::Note)) {
+        ASSERT_LT(e.n, 16);
+        ++notes;
+        EXPECT_NEAR(e.a, known[size_t(e.n)], 4.0) << "slot " << e.n;
+    }
+    EXPECT_EQ(notes, 16);
+    EXPECT_EQ(c.count(UiEvent::Extra), 0u);
+    EXPECT_GE(c.count(UiEvent::Warning), 1u);
+    EXPECT_EQ(c.count(UiEvent::Error), 0u);
+}
+
+TEST(Session, WarningDroppedOnFullQueueIsRetried) {
+    // The UI does not poll while ~20 scoring events/s (240 BPM, sub 4) fill the 4096-entry
+    // queue. An input-overload episode starts while the queue is full, so its Warning cannot
+    // be queued; once the UI polls, the Warning must still arrive although the drops go on
+    // (i.e. the failed attempt did not count as "warned").
+    FakeBackend::Options o;
+    o.speed = 1000;
+    o.backpressure = true;
+    auto fake = std::make_unique<FakeBackend>(o);
+    FakeBackend* f = fake.get();
+    Session s(std::move(fake));
+    SessionConfig cfg = training(240);
+    cfg.subdivision = 4;
+    cfg.countIn = 0;
+    const double t0 = f->nowSec();
+    for (int k = 0; k < 300; ++k) f->dropInput(t0 + 290.0 + 0.1 * k, 50);  // 290 s .. 320 s
+    std::string err;
+    ASSERT_TRUE(s.start(cfg, err)) << err;
+    ASSERT_TRUE(waitUntil([&] { return f->nowSec() > t0 + 300.0; }));
+    Collector c{s, {}};
+    c.poll();  // frees the queue in the middle of the overload episode
+    EXPECT_GT(c.all.size(), 4000u);
+    ASSERT_TRUE(waitUntil([&] { return f->nowSec() > t0 + 318.0; }));
+    c.poll();
+    EXPECT_GE(c.count(UiEvent::Warning), 1u);
+    s.stop();
+}
