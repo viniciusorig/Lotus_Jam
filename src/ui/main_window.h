@@ -20,6 +20,7 @@ class QPushButton;
 class QTabWidget;
 class LevelMeter;
 class TempoTrainingView;
+class TunerWidget;
 
 using BackendFactory =
     std::function<std::unique_ptr<IAudioBackend>(const std::string& inNode, const std::string& outNode)>;
@@ -43,6 +44,18 @@ DeviceLists listPipeWireDevices();
 //    refreshes the score card from Session::summary() (cached by the Session).
 // Closing the window or destroying it stops the session first (helpers joined, Session
 // destroyed before any widget).
+//
+// One session at a time, owned by the tab that started it (sessMode_):
+//  - AFINADOR: the tuner session starts by itself when the tab becomes current and stops when
+//    the tab is left; its Parar/Iniciar pill pauses/resumes it (Parar holds until Iniciar or
+//    the tab is entered again). Instrument, tuning, A4, gain or device changes restart it
+//    (the DSP Tuner takes them at construction). Device combos and gain stay enabled while
+//    the tuner runs (changing them restarts it); a start failure disarms the tuner (banner,
+//    pill back to "Iniciar", no retry loop).
+//  - TREINO DE TEMPO: started/stopped by its own Iniciar/Parar; leaving the tab stops it.
+//  reconcile() applies these rules; it never touches the Session while a start is in flight
+//  (starting_): onStartFinished() calls it again, so a tab change during a start stops the
+//  late session right away.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -51,6 +64,7 @@ public:
     ~MainWindow() override;
 
     TempoTrainingView* tempoView() const { return tempo_; }
+    TunerWidget* tunerView() const { return tuner_; }
     QTabWidget* tabs() const { return tabs_; }
     QLabel* errorBanner() const { return errorBanner_; }
     QLabel* warningNotice() const { return warning_; }
@@ -82,8 +96,12 @@ private Q_SLOTS:
 private:
     enum class Engine { Idle, Starting, Running, Failed };
     void buildUi();
-    void startSession();
+    void startSession(Mode mode);
     void stopSession();
+    void reconcile();
+    void onTabChanged();
+    void onTunerConfigChanged();
+    void syncStartAllowed();
     void recordSample();
     void poll();
     void setEngine(Engine e);
@@ -100,6 +118,11 @@ private:
     std::string sessIn_, sessOut_;
     bool starting_ = false, running_ = false, devicesReady_ = false, listing_ = false;
     int countIn_ = 0;  // count-in (beats) of the current session
+    Mode sessMode_ = Mode::Training;  // mode of the current (or starting) session
+    bool tunerArmed_ = false;    // the tuner should run while its tab is current
+    bool tunerRestart_ = false;  // tuner config changed: restart the running tuner session
+    bool reconciling_ = false;
+    unsigned tunerGen_ = 0, sessTunerGen_ = 0;  // config generation (stale readings dropped)
     std::vector<UiEvent> events_;
 
     std::thread listThread_, startThread_;
@@ -112,6 +135,7 @@ private:
 
     QTabWidget* tabs_ = nullptr;
     TempoTrainingView* tempo_ = nullptr;
+    TunerWidget* tuner_ = nullptr;
     QLabel* errorBanner_ = nullptr;
     QLabel* warning_ = nullptr;
     QLabel* badge_ = nullptr;

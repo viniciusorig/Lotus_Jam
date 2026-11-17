@@ -26,6 +26,7 @@
 #include "ui/tempo_training_view.h"
 #include "ui/theme.h"
 #include "ui/timeline_widget.h"
+#include "ui/tuner_widget.h"
 
 DeviceLists listPipeWireDevices() { return DeviceLists{listInputDevices(), listOutputDevices()}; }
 
@@ -67,7 +68,9 @@ QWidget* placeholder(const QString& title, const QString& text, QWidget* parent)
 }
 
 // Combo box that elides the shown device description to its width (the popup and the
-// tooltips carry the full text).
+// tooltips carry the full text). With no current item it shows the placeholder text
+// ("Procurando dispositivos…", "Nenhum dispositivo encontrado") in the muted colour: Qt only
+// substitutes the placeholder inside QComboBox::paintEvent, which this replaces.
 class ElidingComboBox : public QComboBox {
 public:
     using QComboBox::QComboBox;
@@ -77,6 +80,13 @@ protected:
         QStylePainter p(this);
         QStyleOptionComboBox opt;
         initStyleOption(&opt);
+        if (currentIndex() < 0 && !placeholderText().isEmpty()) {
+            opt.currentText = placeholderText();
+            for (auto group : {QPalette::Active, QPalette::Inactive, QPalette::Disabled}) {
+                opt.palette.setColor(group, QPalette::ButtonText, theme::text_muted);
+                opt.palette.setColor(group, QPalette::Text, theme::text_muted);
+            }
+        }
         p.drawComplexControl(QStyle::CC_ComboBox, opt);
         const QRect field = style()->subControlRect(QStyle::CC_ComboBox, &opt, QStyle::SC_ComboBoxEditField, this);
         opt.currentText = fontMetrics().elidedText(opt.currentText, Qt::ElideRight, field.width());
@@ -125,7 +135,7 @@ MainWindow::MainWindow(BackendFactory factory, DeviceLister lister, QWidget* par
     pollTimer_.start();
     summaryTimer_.setInterval(100);
     connect(&summaryTimer_, &QTimer::timeout, this, [this] {
-        if (running_ && session_) tempo_->summaryCard()->setSummary(session_->summary());
+        if (running_ && session_ && sessMode_ == Mode::Training) tempo_->summaryCard()->setSummary(session_->summary());
     });
     summaryTimer_.start();
     warningTimer_.setSingleShot(true);
@@ -135,7 +145,16 @@ MainWindow::MainWindow(BackendFactory factory, DeviceLister lister, QWidget* par
     refreshDevices();
 }
 
-MainWindow::~MainWindow() { shutdown(); }
+MainWindow::~MainWindow() {
+    // No tab/tuner/combo signal may reach this window while QWidget's destructor deletes the
+    // children (removing tabs emits currentChanged).
+    tabs_->disconnect(this);
+    tuner_->disconnect(this);
+    for (QObject* o : {static_cast<QObject*>(inCombo_), static_cast<QObject*>(outCombo_), static_cast<QObject*>(gain_)})
+        o->disconnect(this);
+    tunerArmed_ = false;
+    shutdown();
+}
 
 void MainWindow::shutdown() {
     pollTimer_.stop();
@@ -149,8 +168,11 @@ void MainWindow::shutdown() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* e) {
+    tunerArmed_ = false;  // no automatic restart after the window was closed
     shutdown();
     tempo_->setRunning(false);
+    tuner_->setRunning(false);
+    tuner_->clearReading();
     lockInputs(false);
     setEngine(Engine::Idle);
     QMainWindow::closeEvent(e);
@@ -247,7 +269,8 @@ void MainWindow::buildUi() {
     tabs_ = new QTabWidget(central);
     tabs_->setDocumentMode(true);
     tabs_->tabBar()->setDrawBase(false);
-    tabs_->addTab(placeholder("AFINADOR", QString::fromUtf8("Afinador — em breve"), tabs_), "AFINADOR");
+    tuner_ = new TunerWidget(tabs_);
+    tabs_->addTab(tuner_, "AFINADOR");
     tempo_ = new TempoTrainingView(tabs_);
     tabs_->addTab(tempo_, "TREINO DE TEMPO");
     tabs_->addTab(placeholder(QString::fromUtf8("MÚSICAS & MIDI"), QString::fromUtf8("Em breve — Partes 2 e 3"), tabs_),
@@ -261,9 +284,24 @@ void MainWindow::buildUi() {
     setEngine(Engine::Idle);
 
     connect(refresh_, &QPushButton::clicked, this, &MainWindow::refreshDevices);
-    connect(tempo_, &TempoTrainingView::startRequested, this, &MainWindow::startSession);
+    connect(tempo_, &TempoTrainingView::startRequested, this, [this] { startSession(Mode::Training); });
     connect(tempo_, &TempoTrainingView::stopRequested, this, &MainWindow::stopSession);
     connect(tempo_, &TempoTrainingView::recordRequested, this, &MainWindow::recordSample);
+
+    connect(tabs_, &QTabWidget::currentChanged, this, &MainWindow::onTabChanged);
+    connect(tuner_, &TunerWidget::startRequested, this, [this] {
+        tunerArmed_ = true;
+        reconcile();
+    });
+    connect(tuner_, &TunerWidget::stopRequested, this, [this] {
+        tunerArmed_ = false;
+        reconcile();
+    });
+    connect(tuner_, &TunerWidget::configChanged, this, &MainWindow::onTunerConfigChanged);
+    // The tuner keeps the device combos and the gain enabled: a change restarts it.
+    connect(inCombo_, &QComboBox::currentIndexChanged, this, &MainWindow::onTunerConfigChanged);
+    connect(outCombo_, &QComboBox::currentIndexChanged, this, &MainWindow::onTunerConfigChanged);
+    connect(gain_, &QDoubleSpinBox::valueChanged, this, &MainWindow::onTunerConfigChanged);
 }
 
 QStringList MainWindow::engineBadgeTexts() { return {"MOTOR PARADO", "INICIANDO", "MOTOR ATIVO", "FALHA"}; }
@@ -351,18 +389,62 @@ void MainWindow::onDevicesListed() {
     syncTooltip(inCombo_, "Dispositivo de entrada (PipeWire)");
     syncTooltip(outCombo_, QString::fromUtf8("Dispositivo de saída (PipeWire)"));
     devicesReady_ = true;
-    tempo_->setStartAllowed(true);
+    syncStartAllowed();
+    reconcile();  // the tuner tab may be waiting for the first scan
+}
+
+// Iniciar of each tab: allowed once the devices are known and while the other tab's session
+// is not starting (its helper thread owns the Session meanwhile).
+void MainWindow::syncStartAllowed() {
+    tempo_->setStartAllowed(devicesReady_ && !(starting_ && sessMode_ == Mode::Tuner));
+    tuner_->setStartAllowed(devicesReady_ && !(starting_ && sessMode_ == Mode::Training));
+}
+
+void MainWindow::onTabChanged() {
+    if (tabs_->currentWidget() == tuner_) tunerArmed_ = true;  // entering the tab (re)starts it
+    reconcile();
+}
+
+void MainWindow::onTunerConfigChanged() {
+    ++tunerGen_;  // readings of the old configuration are dropped from now on
+    if (sessMode_ != Mode::Tuner || !(running_ || starting_)) return;  // applies at the next start
+    tunerRestart_ = true;
+    reconcile();
+}
+
+void MainWindow::reconcile() {
+    if (starting_ || reconciling_) return;  // onStartFinished() calls it again
+    reconciling_ = true;
+    QWidget* current = tabs_->currentWidget();
+    const bool wantTuner = current == tuner_ && tunerArmed_ && devicesReady_;
+    if (running_) {
+        const bool keep = sessMode_ == Mode::Tuner ? wantTuner && !tunerRestart_ : current == tempo_;
+        if (!keep) stopSession();  // synchronous: the Stopped event is dispatched here
+    }
+    if (!running_ && wantTuner) {
+        tunerRestart_ = false;
+        startSession(Mode::Tuner);
+    }
+    reconciling_ = false;
 }
 
 // ---- session ----
 
-void MainWindow::startSession() {
+void MainWindow::startSession(Mode mode) {
     if (starting_ || running_ || !devicesReady_) return;  // Iniciar is disabled until the first scan
+    const bool tuner = mode == Mode::Tuner;
+    // A tuner that cannot start stays stopped (pill "Iniciar") until the user asks again.
+    auto failTuner = [this, tuner] {
+        if (!tuner) return;
+        tunerArmed_ = false;
+        tuner_->setRunning(false);
+    };
     if (!pollTimer_.isActive()) pollTimer_.start();  // stopped by a previous close
     if (!summaryTimer_.isActive()) summaryTimer_.start();
     poll();  // drain what is left of a previous session (its Stopped, a late WAV error)
     if (inCombo_->count() == 0 || outCombo_->count() == 0) {
         showError(QString::fromUtf8("Nenhum dispositivo de áudio encontrado. Conecte a interface e clique em ↻."));
+        failTuner();
         return;
     }
     const std::string in = inCombo_->currentData().toString().toStdString();
@@ -374,6 +456,7 @@ void MainWindow::startSession() {
         if (!b) {
             showError(QString::fromUtf8("Não foi possível abrir os dispositivos de áudio selecionados."));
             setEngine(Engine::Failed);
+            failTuner();
             return;
         }
         backend_ = b.get();
@@ -383,26 +466,41 @@ void MainWindow::startSession() {
     }
 
     SessionConfig cfg;
-    cfg.mode = Mode::Training;
-    cfg.bpm = tempo_->bpm();
-    cfg.countIn = tempo_->countInBeats();
-    cfg.subdivision = tempo_->subdivision();
+    cfg.mode = mode;
     cfg.compensationMs = comp_->value();
     cfg.gainDb = gain_->value();
+    if (tuner) {
+        // Fixed for the session (the DSP Tuner has no setter): configChanged restarts it.
+        cfg.instrument = &tuner_->instrument();
+        cfg.tuning = tuner_->tuning();
+        cfg.a4 = tuner_->a4();
+        sessTunerGen_ = tunerGen_;
+    } else {
+        cfg.bpm = tempo_->bpm();
+        cfg.countIn = tempo_->countInBeats();
+        cfg.subdivision = tempo_->subdivision();
+    }
     countIn_ = cfg.countIn;
+    sessMode_ = mode;
 
     errorBanner_->hide();
     warning_->hide();
-    tempo_->pulse()->reset();
-    tempo_->timeline()->clear();
-    tempo_->summaryCard()->clear();
     level_->reset();
-    tempo_->setRecordingState(TempoTrainingView::Rec::None);
     recPending_ = false;
     userStop_ = false;
     starting_ = true;
-    tempo_->setStarting(true);
-    lockInputs(true);
+    if (tuner) {
+        tuner_->clearReading();
+        tuner_->setStarting(true);
+    } else {
+        tempo_->pulse()->reset();
+        tempo_->timeline()->clear();
+        tempo_->summaryCard()->clear();
+        tempo_->setRecordingState(TempoTrainingView::Rec::None);
+        tempo_->setStarting(true);
+        lockInputs(true);
+    }
+    syncStartAllowed();
     refresh_->setEnabled(false);
     setEngine(Engine::Starting);
 
@@ -430,18 +528,30 @@ void MainWindow::onStartFinished() {
         err = std::move(startErr_);
     }
     starting_ = false;
+    const bool tuner = sessMode_ == Mode::Tuner;
+    syncStartAllowed();
     if (!ok) {
         refresh_->setEnabled(!listing_);
         running_ = false;
-        tempo_->setRunning(false);
+        if (tuner) {
+            tunerArmed_ = false;  // no retry loop: the pill shows "Iniciar"
+            tunerRestart_ = false;
+            tuner_->setRunning(false);
+        } else {
+            tempo_->setRunning(false);
+        }
         lockInputs(false);
         setEngine(Engine::Failed);
         showError(QString::fromStdString(err));
         return;
     }
     running_ = true;
-    tempo_->setRunning(true);
+    if (tuner)
+        tuner_->setRunning(true);
+    else
+        tempo_->setRunning(true);
     setEngine(Engine::Running);
+    reconcile();  // the tab, the tuner config or the pill may have changed meanwhile
 }
 
 void MainWindow::stopSession() {
@@ -501,7 +611,8 @@ void MainWindow::dispatchEvents(const std::vector<UiEvent>& events) {
             break;
         case UiEvent::Extra:  // counted in the summary
             break;
-        case UiEvent::Tuner:  // tuner view: Task 11
+        case UiEvent::Tuner:  // only readings of the tuner's current configuration
+            if (sessMode_ == Mode::Tuner && running_ && sessTunerGen_ == tunerGen_) tuner_->setReading(e.tuner);
             break;
         case UiEvent::Level:
             peak = std::max(peak, e.a);
@@ -521,12 +632,18 @@ void MainWindow::dispatchEvents(const std::vector<UiEvent>& events) {
     if (peak >= 0.0) level_->setPeak(peak);
     if (stopped && running_) {
         running_ = false;
-        tempo_->setRunning(false);
         lockInputs(false);
         refresh_->setEnabled(!listing_);
-        if (session_) tempo_->summaryCard()->setSummary(session_->summary());
         level_->reset();
-        tempo_->pulse()->idle();
+        if (sessMode_ == Mode::Tuner) {
+            tuner_->setRunning(false);
+            tuner_->clearReading();
+            if (!userStop_) tunerArmed_ = false;  // device failure: no automatic restart
+        } else {
+            tempo_->setRunning(false);
+            if (session_) tempo_->summaryCard()->setSummary(session_->summary());
+            tempo_->pulse()->idle();
+        }
         if (recPending_) {
             recPending_ = false;
             tempo_->setRecordingState(TempoTrainingView::Rec::Interrupted, recPath_);

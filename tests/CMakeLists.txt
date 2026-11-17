@@ -18,6 +18,9 @@ gtest_discover_tests(treino_rt_tests DISCOVERY_MODE PRE_TEST)
 add_executable(treino_ui_tests ui_smoke_test.cpp)
 target_link_libraries(treino_ui_tests PRIVATE lotus_ui GTest::gtest)
 target_compile_definitions(treino_ui_tests PRIVATE UI_SMOKE_PNG="${CMAKE_BINARY_DIR}/ui_smoke.png"
-  UI_SMOKE_RUNNING_PNG="${CMAKE_BINARY_DIR}/ui_smoke_running.png")
+  UI_SMOKE_RUNNING_PNG="${CMAKE_BINARY_DIR}/ui_smoke_running.png"
+  UI_TUNER_INTUNE_PNG="${CMAKE_BINARY_DIR}/ui_tuner_intune.png"
+  UI_TUNER_NOSIGNAL_PNG="${CMAKE_BINARY_DIR}/ui_tuner_nosignal.png"
+  UI_TUNER_FAR_PNG="${CMAKE_BINARY_DIR}/ui_tuner_far.png")
 gtest_discover_tests(treino_ui_tests DISCOVERY_MODE PRE_TEST
   PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" LABELS ui)

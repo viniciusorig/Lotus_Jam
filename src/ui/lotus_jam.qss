@@ -76,6 +76,7 @@ QTabBar::tab:selected {
 /* Labels and layout-only containers show the surface behind them (cards, header). */
 QLabel { background-color: transparent; }
 QWidget#Field { background-color: transparent; }
+QWidget#TunerStrip { background-color: transparent; }
 
 QFrame#Header {
     background-color: #111115;

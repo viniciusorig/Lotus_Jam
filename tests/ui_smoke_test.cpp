@@ -15,6 +15,7 @@
 #include <QTemporaryDir>
 #include <QPixmap>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QThread>
@@ -40,6 +41,9 @@
 #include "ui/tempo_training_view.h"
 #include "ui/theme.h"
 #include "ui/timeline_widget.h"
+#include "ui/tuner_widget.h"
+#include "dsp/notes.h"
+#include <QDoubleSpinBox>
 
 // UI smoke tests. Always offscreen (main() forces QT_QPA_PLATFORM=offscreen, CTest sets it too),
 // always on a FakeBackend and a fake device list: no real PipeWire stream, no visible window.
@@ -87,6 +91,15 @@ double jitterMs(int k) {
     return j[k % 16];
 }
 
+// A FakeBackend whose start() fails (as a PipeWire stream that cannot connect).
+struct FailingBackend : FakeBackend {
+    using FakeBackend::FakeBackend;
+    bool start(std::string& err) override {
+        err = "Não foi possível iniciar o áudio (teste).";
+        return false;
+    }
+};
+
 // Factory handing out FakeBackends; remembers the last one and the requested nodes.
 struct FakeFactory {
     FakeBackend* last = nullptr;
@@ -101,6 +114,14 @@ struct FakeFactory {
     // If > 0: the fake clock freezes this long after the audible time of the last scored note
     // (FakeBackend::Options::pauseAtSec), so what is finalised does not depend on wall time.
     double pauseAfterLastSec = 0;
+    // Sustained tones {startOffset, endOffset, hz, amp} (offsets from the stream origin) and an
+    // optional freeze point (offset) for the tuner tests.
+    struct Tone {
+        double start, end, hz, amp;
+    };
+    std::vector<Tone> tones;
+    double pauseAtOffset = 0;
+    bool failStart = false;  // the backend's start() fails (helper-thread failure path)
 
     BackendFactory make() {
         return [this](const std::string& inNode, const std::string& outNode) -> std::unique_ptr<IAudioBackend> {
@@ -115,9 +136,11 @@ struct FakeFactory {
             const double t0 = o.startSec;  // nowSec() is frozen at startSec until start()
             if (pauseAfterLastSec > 0 && notes > 0)
                 o.pauseAtSec = beatTime(cs, t0, countInBeats + notes - 1, o.outputLatencySec) + pauseAfterLastSec;
+            if (pauseAtOffset > 0) o.pauseAtSec = t0 + pauseAtOffset;
             pauseAt = o.pauseAtSec;
-            auto f = std::make_unique<FakeBackend>(o);
+            auto f = failStart ? std::make_unique<FailingBackend>(o) : std::make_unique<FakeBackend>(o);
             last = f.get();
+            for (const Tone& t : tones) f->scheduleTone(t0 + t.start, t0 + t.end, t.hz, t.amp);
             for (int k = 0; k < notes; ++k)
                 f->scheduleNote(beatTime(cs, t0, countInBeats + k, o.outputLatencySec) + (offsetMs + jitterMs(k)) / 1000.0,
                                 41.2, 0.3);
@@ -131,6 +154,32 @@ bool waitRunning(MainWindow& w, bool running) {
         return w.tempoView()->startButton()->text() == (running ? QString("Parar") : QString("Iniciar")) &&
                w.tempoView()->isRunning() == running;
     });
+}
+
+bool waitTuner(MainWindow& w, bool running, double limit = timeoutSec()) {
+    TunerWidget* t = w.tunerView();
+    return pumpUntil(
+        [&] {
+            return t->startButton()->text() == (running ? QString("Parar") : QString("Iniciar")) &&
+                   t->isRunning() == running;
+        },
+        limit);
+}
+
+void selectInstrument(TunerWidget* t, const char* id) {
+    const int i = t->instrumentCombo()->findData(QString(id));
+    ASSERT_GE(i, 0) << id;
+    t->instrumentCombo()->setCurrentIndex(i);
+}
+
+double hzOf(int midi, double cents) { return midiToHz(midi) * std::pow(2.0, cents / 1200.0); }
+
+// Counts the "lit" pixels (text, arrows) of a widget grab.
+int litPixels(const QImage& img) {
+    int n = 0;
+    for (int y = 0; y < img.height(); ++y)
+        for (int x = 0; x < img.width(); ++x) n += qGray(img.pixel(x, y)) > 70;
+    return n;
 }
 
 }  // namespace
@@ -219,7 +268,8 @@ TEST(UiSmoke, TrainingSessionWithFakeBackend) {
     w.grab().save(UI_SMOKE_RUNNING_PNG);  // mid-session look (pulse, live timeline)
     ASSERT_TRUE(pumpUntil([&] { return v->timeline()->noteCount() >= 16; })) << v->timeline()->noteCount();
     ASSERT_TRUE(pumpUntil([&] { return ff.last->nowSec() >= ff.pauseAt; }));
-    QThread::msleep(100);  // let the scoring thread catch up with the frozen clock
+    // Let the scoring thread finalise every slot of the frozen clock (summary card updated).
+    ASSERT_TRUE(pumpUntil([&] { return v->summaryCard()->shown().slots >= 16; }));
     v->startButton()->click();  // Parar
     ASSERT_TRUE(waitRunning(w, false));
     EXPECT_FALSE(v->startButton()->property("running").toBool());
@@ -446,6 +496,17 @@ TEST(UiSmoke, StartWaitsForDeviceScan) {
     EXPECT_FALSE(w.devicesReady());
     EXPECT_FALSE(v->startButton()->isEnabled());
     EXPECT_EQ(w.inputCombo()->placeholderText(), QString::fromUtf8("Procurando dispositivos…"));
+    // The placeholder is actually DRAWN (not just set): more lit pixels than the same combo
+    // with no placeholder.
+    {
+        QComboBox* c = w.inputCombo();
+        EXPECT_EQ(c->currentIndex(), -1);
+        const int withText = litPixels(c->grab().toImage());
+        c->setPlaceholderText(QString());
+        const int empty = litPixels(c->grab().toImage());
+        c->setPlaceholderText(QString::fromUtf8("Procurando dispositivos…"));
+        EXPECT_GT(withText, empty + 40) << withText << " vs " << empty;
+    }
     v->startButton()->click();  // disabled: nothing happens
     QCoreApplication::processEvents();
     EXPECT_TRUE(w.errorBanner()->isHidden());
@@ -608,6 +669,399 @@ TEST(UiSmoke, NumbersFollowLocale) {
         EXPECT_EQ(card.totalText(), QString("97.5"));
     }
     QLocale::setDefault(saved);
+}
+
+
+// "Nenhum dispositivo encontrado" is drawn in the combo when the scan finds nothing.
+TEST(UiSmoke, NoDevicePlaceholderDrawn) {
+    FakeFactory ff;
+    MainWindow w(ff.make(), [] { return DeviceLists{}; });
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    QComboBox* c = w.inputCombo();
+    EXPECT_EQ(c->currentIndex(), -1);
+    EXPECT_EQ(c->placeholderText(), QString::fromUtf8("Nenhum dispositivo encontrado"));
+    const int withText = litPixels(c->grab().toImage());
+    c->setPlaceholderText(QString());
+    const int empty = litPixels(c->grab().toImage());
+    EXPECT_GT(withText, empty + 40) << withText << " vs " << empty;
+}
+
+// ---------------------------------------------------------------- tuner (Task 11)
+
+TEST(UiSmoke, TunerShowsStringAndCents) {
+    const QLocale saved;
+    QLocale::setDefault(QLocale(QLocale::Portuguese, QLocale::Brazil));
+    {
+        FakeFactory ff;
+        ff.tones = {{0.1, 1e6, hzOf(40, 15.0), 0.3}};  // E2 + 15 cents, sustained
+        MainWindow w(ff.make(), fakeDevices);
+        w.resize(1180, 780);
+        w.show();
+        ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+        TunerWidget* t = w.tunerView();
+        ASSERT_NE(t, nullptr);
+        EXPECT_EQ(w.tabs()->widget(0), t);  // first tab: AFINADOR
+        selectInstrument(t, "violao");
+        t->tuningCombo()->setCurrentIndex(0);  // Padrão
+        EXPECT_EQ(ff.calls, 0);                // no session while the tab is not shown
+        w.tabs()->setCurrentWidget(t);
+        ASSERT_TRUE(waitTuner(w, true));
+        EXPECT_EQ(ff.calls, 1);
+        EXPECT_EQ(ff.in, fakeDevices().inputs[1].name);  // the global input/output selection
+        EXPECT_EQ(ff.out, fakeDevices().outputs[1].name);
+
+        ASSERT_TRUE(pumpUntil([&] { return t->noteText() == "E2"; }, 30)) << t->statusText().toStdString();
+        EXPECT_EQ(t->highlightedString(), 1);
+        ASSERT_TRUE(pumpUntil([&] { return t->centsShown() >= 13.0 && t->centsShown() <= 17.0; }, 30))
+            << t->centsShown();
+        EXPECT_FALSE(t->glowActive());
+        // pt-BR readout: "83,12 Hz  •  +15,0 cents".
+        const QString s = t->statusText();
+        EXPECT_TRUE(QRegularExpression(QString::fromUtf8("^\\d+,\\d{2} Hz  •  \\+1[3-7],\\d cents$"))
+                        .match(s)
+                        .hasMatch())
+            << s.toStdString();
+        t->startButton()->click();  // Parar
+        ASSERT_TRUE(waitTuner(w, false));
+    }
+    QLocale::setDefault(saved);
+}
+
+TEST(UiSmoke, TunerNoSignalMessage) {
+    // 1. Silence (noise floor only).
+    {
+        FakeFactory ff;
+        MainWindow w(ff.make(), fakeDevices);
+        w.resize(1180, 780);
+        w.show();
+        ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+        TunerWidget* t = w.tunerView();
+        selectInstrument(t, "violao");
+        w.tabs()->setCurrentWidget(t);
+        ASSERT_TRUE(waitTuner(w, true));
+        ASSERT_TRUE(pumpUntil([&] { return t->readingCount() >= 10; }, 30));
+        EXPECT_EQ(t->statusText().compare("Sem sinal", Qt::CaseInsensitive), 0) << t->statusText().toStdString();
+        EXPECT_EQ(t->statusText(), QString("Sem sinal"));
+        EXPECT_FALSE(t->glowActive());
+        EXPECT_EQ(t->highlightedString(), 0);
+        EXPECT_TRUE(t->noteText().isEmpty());
+        EXPECT_DOUBLE_EQ(t->centsShown(), 0.0);
+        EXPECT_TRUE(w.grab().save(UI_TUNER_NOSIGNAL_PNG));
+    }
+    // 2. baixo4: an in-tune E1, then 60 Hz hum (150 cents from A1) and 440 Hz (out of range).
+    {
+        FakeFactory ff;
+        ff.tones = {{0.1, 1.5, hzOf(28, 0.0), 0.3}, {2.0, 4.0, 60.0, 0.3}, {4.5, 6.5, 440.0, 0.3}};
+        ff.pauseAtOffset = 6.6;
+        MainWindow w(ff.make(), fakeDevices);
+        w.show();
+        ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+        TunerWidget* t = w.tunerView();
+        selectInstrument(t, "baixo4");
+        std::vector<TunerReading> seen;
+        int trailingUnvoiced = 0;
+        QObject::connect(t, &TunerWidget::readingApplied, t, [&](const TunerReading& r) {
+            seen.push_back(r);
+            trailingUnvoiced = r.voiced ? 0 : trailingUnvoiced + 1;
+        });
+        w.tabs()->setCurrentWidget(t);
+        ASSERT_TRUE(waitTuner(w, true));
+        ASSERT_TRUE(pumpUntil([&] { return t->noteText() == "E1"; }, 30));
+        // 60 Hz and 440 Hz (and the gaps) are 5 s of input: ~100 unvoiced readings follow E1.
+        ASSERT_TRUE(pumpUntil([&] { return trailingUnvoiced >= 80; }, 30)) << trailingUnvoiced;
+        for (const TunerReading& r : seen)
+            if (r.voiced) {
+                EXPECT_NEAR(r.hz, hzOf(28, 0.0), 1.0) << "voiced reading at " << r.hz << " Hz";
+            }
+        EXPECT_EQ(t->statusText().compare("Sem sinal", Qt::CaseInsensitive), 0) << t->statusText().toStdString();
+        EXPECT_FALSE(t->glowActive());
+        EXPECT_EQ(t->highlightedString(), 0);
+    }
+}
+
+TEST(UiSmoke, TunerGlowWhenInTune) {
+    FakeFactory ff;
+    ff.tones = {{0.1, 2.0, 82.41, 0.3}, {2.5, 1e6, hzOf(40, 20.0), 0.3}};
+    MainWindow w(ff.make(), fakeDevices);
+    w.resize(1180, 780);
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    TunerWidget* t = w.tunerView();
+    selectInstrument(t, "violao");
+    w.tabs()->setCurrentWidget(t);
+    ASSERT_TRUE(waitTuner(w, true));
+    ASSERT_TRUE(pumpUntil([&] { return t->glowActive(); }, 30)) << t->statusText().toStdString();
+    EXPECT_EQ(t->noteText(), QString("E2"));
+    EXPECT_EQ(t->highlightedString(), 1);
+    EXPECT_TRUE(t->animating());  // the glow ring pulses while in tune
+    ASSERT_TRUE(pumpUntil([&] { return std::fabs(t->centsShown()) < 2.0; }, 30));
+    EXPECT_TRUE(w.grab().save(UI_TUNER_INTUNE_PNG));
+    // +20 cents: no glow.
+    ASSERT_TRUE(pumpUntil([&] { return t->centsShown() > 18.0; }, 30)) << t->centsShown();
+    EXPECT_FALSE(t->glowActive());
+    EXPECT_EQ(t->noteText(), QString("E2"));
+    t->startButton()->click();
+    ASSERT_TRUE(waitTuner(w, false));
+    EXPECT_FALSE(t->glowActive());
+}
+
+TEST(UiSmoke, TunerSwitchesInstrument) {
+    TunerWidget t;
+    const QStringList std3 = {QString::fromUtf8("Padrão"), "Drop D", "Meio-tom abaixo"};
+    const QStringList std4 = {QString::fromUtf8("Padrão"), "Drop D", "Meio-tom abaixo", "DADGAD"};
+    auto tunings = [&] {
+        QStringList l;
+        for (int i = 0; i < t.tuningCombo()->count(); ++i) l << t.tuningCombo()->itemText(i);
+        return l;
+    };
+    ASSERT_EQ(t.instrumentCombo()->count(), 5);
+    EXPECT_EQ(t.instrumentCombo()->itemText(0), QString::fromUtf8("Violão"));
+    int changes = 0;
+    QObject::connect(&t, &TunerWidget::configChanged, &t, [&] { ++changes; });
+
+    selectInstrument(&t, "baixo4");
+    EXPECT_EQ(t.stringLabels(), (QStringList{"E1", "A1", "D2", "G2"}));
+    EXPECT_EQ(tunings(), std3);
+    EXPECT_EQ(changes, 1);  // one notification per user change
+    selectInstrument(&t, "baixo5");
+    EXPECT_EQ(t.stringLabels(), (QStringList{"B0", "E1", "A1", "D2", "G2"}));
+    EXPECT_EQ(tunings(), std3);
+    selectInstrument(&t, "baixo6");
+    EXPECT_EQ(t.stringLabels(), (QStringList{"B0", "E1", "A1", "D2", "G2", "C3"}));
+    EXPECT_EQ(tunings(), std3);
+    selectInstrument(&t, "guitarra");
+    EXPECT_EQ(tunings(), std4);
+    selectInstrument(&t, "violao");
+    EXPECT_EQ(t.stringLabels(), (QStringList{"E2", "A2", "D3", "G3", "B3", "E4"}));
+    EXPECT_EQ(tunings(), std4);
+    EXPECT_EQ(t.instrument().id, std::string("violao"));
+
+    t.tuningCombo()->setCurrentIndex(3);  // DADGAD
+    EXPECT_EQ(t.stringLabels(), (QStringList{"D2", "A2", "D3", "G3", "A3", "D4"}));
+    t.tuningCombo()->setCurrentIndex(1);  // Drop D
+    EXPECT_EQ(t.stringLabels().front(), QString("D2"));
+    EXPECT_EQ(t.tuning().name, std::string("Drop D"));
+
+    // A4: default 440.0, step 0.5.
+    EXPECT_DOUBLE_EQ(t.a4Spin()->value(), 440.0);
+    EXPECT_DOUBLE_EQ(t.a4Spin()->singleStep(), 0.5);
+    EXPECT_LE(t.a4Spin()->minimum(), 415.0);
+    EXPECT_GE(t.a4Spin()->maximum(), 466.0);
+    const int before = changes;
+    t.a4Spin()->setValue(442.0);
+    EXPECT_DOUBLE_EQ(t.a4(), 442.0);
+    EXPECT_EQ(changes, before + 1);
+
+    // A stale reading for a string the current tuning does not have is ignored.
+    selectInstrument(&t, "baixo4");
+    t.setReading(TunerReading{true, 5, 330.0, 329.6, 2.0});
+    EXPECT_EQ(t.highlightedString(), 0);
+    EXPECT_EQ(t.statusText(), QString("Sem sinal"));
+}
+
+// Pointer smoothing: a step 0 -> +30 cents reaches 90 % within < 100 ms of 16 ms frames,
+// without overshoot; unvoiced parks it back at the centre.
+TEST(UiSmoke, TunerRespondsWithin100ms) {
+    TunerWidget t;
+    selectInstrument(&t, "violao");
+    t.setReading(TunerReading{true, 0, 82.41, 82.41, 0.0});
+    for (int i = 0; i < 100; ++i) t.advance(0.016);
+    EXPECT_NEAR(t.centsShown(), 0.0, 1e-6);
+    t.setReading(TunerReading{true, 0, hzOf(40, 30.0), 82.41, 30.0});
+    int frames = 0;
+    while (t.centsShown() < 27.0 && frames < 100) {
+        t.advance(0.016);
+        ++frames;
+        EXPECT_LE(t.centsShown(), 30.0);
+    }
+    EXPECT_GE(frames, 2) << "no smoothing at all";
+    EXPECT_LT(frames * 16, 100) << frames << " frames";
+    // Same with the analytic step: 90 % within tau * ln(10).
+    EXPECT_LT(TunerWidget::kPointerTauSec * std::log(10.0), 0.1);
+    EXPECT_NEAR(TunerWidget::smoothStep(0.0, 30.0, 1.0), 30.0, 1e-6);
+
+    // Far flat (-25 cents): LED crown in dark magenta, no glow (screenshot for review).
+    t.resize(1000, 640);
+    t.setReading(TunerReading{true, 1, hzOf(45, -25.0), midiToHz(45), -25.0});
+    for (int i = 0; i < 40; ++i) t.advance(0.016);
+    EXPECT_NEAR(t.centsShown(), -25.0, 0.1);
+    EXPECT_FALSE(t.glowActive());
+    EXPECT_EQ(t.noteText(), QString("A2"));
+    EXPECT_TRUE(t.grab().save(UI_TUNER_FAR_PNG));
+
+    t.setReading(TunerReading{false, -1, 0, 0, 0});
+    EXPECT_EQ(t.statusText(), QString("Sem sinal"));
+    for (int i = 0; i < 10; ++i) t.advance(0.016);
+    EXPECT_NEAR(t.centsShown(), 0.0, 0.5);
+    // The animation stops once the pointer has settled and there is no glow.
+    for (int i = 0; i < 100; ++i) t.advance(0.016);
+    QCoreApplication::processEvents();
+    EXPECT_FALSE(t.animating());
+}
+
+// Only one session at a time: the tuner runs while its tab is shown; leaving the tab stops
+// it; the training tab keeps its own Iniciar/Parar and is stopped when the tuner tab opens.
+TEST(UiSmoke, TunerTabSwitchingStartsAndStopsSession) {
+    FakeFactory ff;
+    MainWindow w(ff.make(), fakeDevices);
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    TunerWidget* t = w.tunerView();
+    TempoTrainingView* v = w.tempoView();
+    EXPECT_EQ(w.tabs()->currentWidget(), v);
+    EXPECT_EQ(ff.calls, 0);
+
+    w.tabs()->setCurrentWidget(t);
+    ASSERT_TRUE(waitTuner(w, true));
+    EXPECT_EQ(w.engineBadge()->text(), QString("MOTOR ATIVO"));
+    EXPECT_FALSE(v->isRunning());
+
+    w.tabs()->setCurrentWidget(v);  // leaving the tuner stops it
+    ASSERT_TRUE(waitTuner(w, false));
+    EXPECT_EQ(w.engineBadge()->text(), QString("MOTOR PARADO"));
+    EXPECT_TRUE(w.errorBanner()->isHidden());
+    EXPECT_TRUE(v->startButton()->isEnabled());
+
+    v->startButton()->click();  // training
+    ASSERT_TRUE(waitRunning(w, true));
+    EXPECT_FALSE(t->isRunning());
+    w.tabs()->setCurrentWidget(t);  // stops the training, starts the tuner
+    ASSERT_TRUE(waitTuner(w, true));
+    EXPECT_FALSE(v->isRunning());
+    EXPECT_EQ(v->startButton()->text(), QString("Iniciar"));
+
+    w.tabs()->setCurrentIndex(2);  // MÚSICAS & MIDI
+    ASSERT_TRUE(waitTuner(w, false));
+    w.tabs()->setCurrentWidget(t);  // AFINADOR -> runs again
+    ASSERT_TRUE(waitTuner(w, true));
+
+    // Parar on the tuner holds (no automatic restart) until Iniciar or the tab is re-entered.
+    t->startButton()->click();
+    ASSERT_TRUE(waitTuner(w, false));
+    for (int i = 0; i < 30; ++i) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(2);
+    }
+    EXPECT_FALSE(t->isRunning());
+    EXPECT_EQ(t->startButton()->text(), QString("Iniciar"));
+    t->startButton()->click();
+    ASSERT_TRUE(waitTuner(w, true));
+
+    // Tab changes while a start is in flight: the late start is stopped right away.
+    w.tabs()->setCurrentWidget(v);
+    ASSERT_TRUE(waitTuner(w, false));
+    w.tabs()->setCurrentWidget(t);
+    w.tabs()->setCurrentWidget(v);  // before the helper thread reported back
+    ASSERT_TRUE(pumpUntil([&] {
+        return !t->isRunning() && t->startButton()->text() == QString("Iniciar") &&
+               w.engineBadge()->text() == QString("MOTOR PARADO");
+    }));
+    for (int i = 0; i < 30; ++i) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(2);
+    }
+    EXPECT_FALSE(t->isRunning());
+    EXPECT_EQ(w.engineBadge()->text(), QString("MOTOR PARADO"));
+    EXPECT_TRUE(v->startButton()->isEnabled());
+    v->startButton()->click();  // the training still works afterwards
+    ASSERT_TRUE(waitRunning(w, true));
+    v->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, false));
+    EXPECT_EQ(ff.calls, 1);  // one backend (same devices), one Session, reused
+}
+
+// Instrument, tuning, A4 and gain changes restart the tuner session with the new values.
+TEST(UiSmoke, TunerRestartsOnConfigChange) {
+    FakeFactory ff;
+    ff.tones = {{0.1, 1e6, hzOf(28, 0.0), 0.3}};  // E1: out of the violão's range
+    MainWindow w(ff.make(), fakeDevices);
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    TunerWidget* t = w.tunerView();
+    selectInstrument(t, "violao");
+    w.tabs()->setCurrentWidget(t);
+    ASSERT_TRUE(waitTuner(w, true));
+    FakeBackend* f = ff.last;
+    ASSERT_TRUE(pumpUntil([&] { return t->readingCount() >= 10; }, 30));
+    EXPECT_EQ(t->statusText(), QString("Sem sinal"));
+
+    double s0 = f->streamStartSec();
+    selectInstrument(t, "baixo4");
+    ASSERT_TRUE(pumpUntil([&] { return t->isRunning() && f->streamStartSec() > s0; }));
+    ASSERT_TRUE(pumpUntil([&] { return t->noteText() == "E1"; }, 30)) << t->statusText().toStdString();
+    EXPECT_EQ(t->highlightedString(), 1);
+
+    s0 = f->streamStartSec();
+    t->tuningCombo()->setCurrentIndex(2);  // Meio-tom abaixo: E1 is now 100 cents sharp of Eb1
+    ASSERT_TRUE(pumpUntil([&] { return t->isRunning() && f->streamStartSec() > s0; }));
+
+    s0 = f->streamStartSec();
+    t->a4Spin()->setValue(441.0);
+    ASSERT_TRUE(pumpUntil([&] { return t->isRunning() && f->streamStartSec() > s0; }));
+
+    s0 = f->streamStartSec();
+    w.gainSpin()->setValue(6.0);  // global gain
+    ASSERT_TRUE(pumpUntil([&] { return t->isRunning() && f->streamStartSec() > s0; }));
+    EXPECT_TRUE(w.errorBanner()->isHidden());
+    EXPECT_EQ(ff.calls, 1);
+}
+
+// A start failure shows the pt-BR banner, leaves the pill at "Iniciar" and is not retried
+// in a loop.
+TEST(UiSmoke, TunerStartFailureShowsBanner) {
+    FakeFactory ff;
+    ff.failStart = true;
+    MainWindow w(ff.make(), fakeDevices);
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    TunerWidget* t = w.tunerView();
+    w.tabs()->setCurrentWidget(t);
+    ASSERT_TRUE(pumpUntil([&] { return !w.errorBanner()->isHidden(); }));
+    EXPECT_EQ(w.errorBanner()->text(), QString::fromUtf8("Não foi possível iniciar o áudio (teste)."));
+    ASSERT_TRUE(waitTuner(w, false));
+    EXPECT_TRUE(t->startButton()->isEnabled());
+    EXPECT_EQ(w.engineBadge()->text(), QString("FALHA"));
+    t->a4Spin()->setValue(441.0);  // a config change while stopped does not start it
+    for (int i = 0; i < 30; ++i) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(2);
+    }
+    EXPECT_FALSE(t->isRunning());
+    EXPECT_EQ(t->startButton()->text(), QString("Iniciar"));
+
+    // The backend cannot even be created.
+    MainWindow w2([](const std::string&, const std::string&) { return std::unique_ptr<IAudioBackend>(); },
+                  fakeDevices);
+    ASSERT_TRUE(pumpUntil([&] { return w2.devicesReady(); }));
+    w2.tabs()->setCurrentWidget(w2.tunerView());
+    ASSERT_TRUE(pumpUntil([&] { return !w2.errorBanner()->isHidden(); }));
+    EXPECT_FALSE(w2.errorBanner()->text().isEmpty());
+    EXPECT_EQ(w2.tunerView()->startButton()->text(), QString("Iniciar"));
+    EXPECT_FALSE(w2.tunerView()->isRunning());
+}
+
+TEST(UiSmoke, TunerCloseDuringSessionIsClean) {
+    FakeFactory ff;
+    ff.tones = {{0.1, 1e6, 82.41, 0.3}};
+    auto w = std::make_unique<MainWindow>(ff.make(), fakeDevices);
+    w->show();
+    ASSERT_TRUE(pumpUntil([&] { return w->devicesReady(); }));
+    w->tabs()->setCurrentWidget(w->tunerView());
+    ASSERT_TRUE(waitTuner(*w, true));
+    ASSERT_TRUE(pumpUntil([&] { return w->tunerView()->glowActive(); }, 30));
+    w->close();
+    EXPECT_FALSE(w->tunerView()->isRunning());
+    w.reset();  // stops the session, joins its threads, then destroys the widgets
+    QCoreApplication::processEvents();
+
+    // Destroyed while a tuner start is in flight.
+    auto w2 = std::make_unique<MainWindow>(ff.make(), fakeDevices);
+    ASSERT_TRUE(pumpUntil([&] { return w2->devicesReady(); }));
+    w2->tabs()->setCurrentWidget(w2->tunerView());
+    w2.reset();
+    QCoreApplication::processEvents();
+    SUCCEED();
 }
 
 #if defined(__SANITIZE_THREAD__)
