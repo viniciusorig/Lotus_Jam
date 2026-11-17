@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 
+#include "app/input_timeline.h"
 #include "audio/backend.h"
 #include "audio/click_scheduler.h"
 #include "core/clock_map.h"
@@ -40,9 +41,12 @@ struct SessionConfig {
 //   Tuner:  tuner = reading.
 //   Level:  a = input peak 0..1 (after gain), ~20 Hz. Dropped when the queue is full.
 //   Error:  text = pt-BR message.
-//   Stopped: emitted exactly once per session end (stop() or device failure), last.
+//   Stopped: emitted exactly once per session end (stop() or device failure), and it is the
+//           last event of that session: pollEvents never delivers an event of that session
+//           after it, nor an event of the next session before it.
+//   Warning: text = pt-BR message for a non-fatal problem (input overload); the session goes on.
 struct UiEvent {
-    enum Type { Beat, Note, Miss, Extra, Tuner, Level, Error, Stopped } type = Beat;
+    enum Type { Beat, Note, Miss, Extra, Tuner, Level, Error, Stopped, Warning } type = Beat;
     int64_t n = 0;
     double a = 0, b = 0;
     TunerReading tuner{};
@@ -60,6 +64,10 @@ struct UiEvent {
 //    maps onsets to backend time, emits Beat/Note/Miss/Extra, watches backend.failed().
 // Each worker thread has its own SPSC event queue (never blocks: Level/Tuner/other events
 // are dropped when full, a reserve keeps room for Error and Stopped); pollEvents drains both.
+// Dropped input (backend.inputDroppedFrames()) does not break the timing: the input timeline
+// is split at the gap (see InputTimeline) and one Warning is emitted per overload episode (an
+// episode ends after 5 s of backend time without drops). The OnsetDetector is not reset: its
+// sample indices stay in the written-frames domain (a note cut by the gap may be missed).
 //
 // start/stop/pollEvents/recordSample must be called from one controlling (UI) thread;
 // summary() is thread-safe. The destructor stops and joins everything.
@@ -81,8 +89,9 @@ public:
     // Snapshot refreshed by the scoring thread at most every 250 ms and at stop.
     GridScorer::Summary summary() const;
     // Records `seconds` of raw input (16-bit mono 48 kHz WAV at wavPath), starting with the
-    // next input block of the running (or next) session. A session that stops early writes
-    // what was recorded so far. A write failure is reported as an Error event.
+    // next input block of the running session; ignored when no session runs. A session that
+    // stops early writes what was recorded so far; a request not yet started when the session
+    // stops is discarded. A write failure is reported as an Error event.
     void recordSample(const std::string& wavPath, double seconds);
 
 private:
@@ -115,7 +124,8 @@ private:
     std::unique_ptr<OnsetDetector> onset_;
     std::unique_ptr<::Tuner> tuner_;
     std::unique_ptr<GridScorer> scorer_;
-    std::unique_ptr<ClockMap> inMap_, outMap_;
+    std::unique_ptr<InputTimeline> inTimeline_;  // input frame -> capture time, gap aware
+    std::unique_ptr<ClockMap> outMap_;
     double gain_ = 1.0;
 
     std::thread analysis_, scoring_;
@@ -128,6 +138,7 @@ private:
     SpscRing<UiEvent> anaEvents_{64};
     SpscRing<UiEvent> scoEvents_{4096};
     static constexpr size_t kReserve = 8;
+    std::vector<UiEvent> carry_;  // controller: previous session's undelivered scoring events
 
     // Recording hand-off: controlling thread -> analysis thread.
     std::atomic<Recording*> recReq_{nullptr};

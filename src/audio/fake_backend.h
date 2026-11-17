@@ -17,7 +17,11 @@
 // frozen while stopped, so the value read before start() is the stream origin t0).
 // For a stream started at t0, block k (frames [480k, 480k+480)):
 //  - output frame f is audible at t0 + f/48000 + outputLatencySec;
-//  - input frame i was captured at t0 + i/48000 - inputLatencySec;
+//  - produced input frame i was captured at t0 + i/48000 - inputLatencySec. When input is
+//    dropped (ring full, or dropInput()), the TimePoints count frames WRITTEN to input()
+//    (IAudioBackend contract) and carry the capture time of the produced frame at that
+//    boundary, so their time jumps forward by the dropped duration; no TimePoint is pushed for
+//    a block of which nothing was written;
 //  - after block k is produced, nowSec() = t0 + 480(k+1)/48000.
 // Deterministic for a given seed and schedule apart from thread scheduling (with
 // `backpressure` the data is fully deterministic).
@@ -52,6 +56,7 @@ public:
     SpscRing<TimePoint>& inputTimes() override { return inTimes_; }
     SpscRing<TimePoint>& outputTimes() override { return outTimes_; }
     uint32_t xruns() const override { return xruns_.load(std::memory_order_relaxed); }
+    uint64_t inputDroppedFrames() const override { return dropped_.load(std::memory_order_acquire); }
     bool failed(std::string& err) const override;
     double nowSec() const override { return now_.load(std::memory_order_acquire); }
 
@@ -59,6 +64,14 @@ public:
     // tSec (virtual clock). Single producer: call from one thread (any time). At most 1024
     // pending notes; extra notes are ignored.
     void scheduleNote(double tSec, double hz, double amp);
+    // Test hook: input produced from capture time atSec on is discarded as if the input ring
+    // were full, for `frames` frames extended to the end of the block they end in (like a full
+    // ring, which keeps the head of a block and drops the rest). Call only while stopped; it
+    // applies to the next start() only (a time before that stream's start is ignored).
+    void dropInput(double atSec, size_t frames) {
+        dropAtSec_ = atSec;
+        dropFrames_ = frames;
+    }
     // The device "disappears": the driver stops delivering data and failed() becomes true
     // until the next start().
     void simulateFailure() { failed_.store(true, std::memory_order_release); }
@@ -88,6 +101,10 @@ private:
     std::atomic<bool> stopReq_{false};
     std::atomic<bool> failed_{false};
     std::atomic<uint32_t> xruns_{0};
+    std::atomic<uint64_t> dropped_{0};
+    double dropAtSec_ = 0.0;
+    size_t dropFrames_ = 0;
+    int64_t dropBegin_ = 0, dropEnd_ = 0;  // produced-frame range, set by start()
     std::atomic<double> now_;
     double t0_ = 0.0;  // written by start() before the driver runs
     uint64_t rng_;

@@ -64,6 +64,12 @@ bool waitUntil(const std::function<bool()>& cond) {
     return true;
 }
 
+// Like waitUntil but with a short timeout, for best-effort cleanup only (never asserted).
+void waitUntilQuick(const std::function<bool()>& cond) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!cond() && std::chrono::steady_clock::now() < end) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+
 struct Collector {
     Session& s;
     std::vector<UiEvent> all;
@@ -361,12 +367,18 @@ TEST(Session, StartStopStress) {
             const double t0 = f->nowSec();
             ASSERT_TRUE(waitUntil([&] { return f->nowSec() > t0 + 0.2 * (i % 7); }));
         }
-        if (i % 4 == 0) s.recordSample((std::filesystem::temp_directory_path() / "treino_stress.wav").string(), 0.5);
+        const auto wav = std::filesystem::temp_directory_path() / ("treino_stress_" + std::to_string(i) + ".wav");
+        if (i % 4 == 0) s.recordSample(wav.string(), 0.5);
         s.stop();
         c.poll();
         EXPECT_EQ(c.count(UiEvent::Stopped), size_t(i + 1));
     }
-    std::filesystem::remove(std::filesystem::temp_directory_path() / "treino_stress.wav");
+    for (int i = 0; i < 20; i += 4) {
+        // A partial recording may still be in its writer thread: wait for it, then clean up.
+        const auto wav = std::filesystem::temp_directory_path() / ("treino_stress_" + std::to_string(i) + ".wav");
+        waitUntilQuick([&] { return std::filesystem::exists(wav); });
+        std::filesystem::remove(wav);
+    }
     // Destructor with a running session must also stop and join everything.
     std::string err;
     ASSERT_TRUE(s.start(training(), err)) << err;
@@ -435,6 +447,7 @@ TEST(Session, AudioThreadsNeverBlockOnUi) {
     FakeBackend::Options o;
     o.speed = 10;
     o.backpressure = false;  // a stalled analysis thread would overflow the input ring (xrun)
+    o.inputCapacity = size_t(1) << 20;  // ~22 s: a slow (not stalled) machine cannot overflow
     o.noiseSigma = 0.002;
     auto fake = std::make_unique<FakeBackend>(o);
     FakeBackend* f = fake.get();
@@ -478,4 +491,204 @@ TEST(Session, RejectsInvalidConfig) {
     s.pollEvents(ev);
     EXPECT_TRUE(ev.empty());  // no session, no Stopped
     s.stop();
+}
+
+// ---------------------------------------------------------------- input overflow (fix round 1)
+
+TEST(FakeBackend, InputTimePointsCountWrittenFrames) {
+    FakeBackend::Options o;
+    o.speed = 20;
+    o.backpressure = true;
+    FakeBackend f(o);
+    const double t0 = f.nowSec();
+    // Drop from capture time t0 + 0.5 s: 3000 frames, extended to the end of that block.
+    f.dropInput(t0 + 0.5, 3000);
+    std::string err;
+    ASSERT_TRUE(f.start(err)) << err;
+    ASSERT_TRUE(waitUntil([&] { return f.nowSec() > t0 + 1.0; }));
+    f.stop();
+    std::vector<float> x(size_t(1) << 17);
+    const size_t delivered = f.input().read(x.data(), x.size());
+    std::vector<TimePoint> tp(1024);
+    tp.resize(f.inputTimes().read(tp.data(), tp.size()));
+    ASSERT_GE(tp.size(), 50u);
+    // TimePoint frames count frames written to input(), so the last one equals what was read.
+    EXPECT_EQ(tp.back().frame, int64_t(delivered));
+    EXPECT_GE(f.inputDroppedFrames(), 3000u);
+    EXPECT_LT(f.inputDroppedFrames(), 3000u + 2 * FakeBackend::kBlock);
+    // Produced = delivered + dropped; the times keep the produced (real) timeline.
+    const double produced = double(delivered) + double(f.inputDroppedFrames());
+    EXPECT_NEAR(tp.back().tSec, t0 + produced / kSr - o.inputLatencySec, 1e-9);
+    // Exactly one time jump, equal to the dropped duration.
+    int jumps = 0;
+    for (size_t i = 1; i < tp.size(); ++i) {
+        const double gap = (tp[i].tSec - tp[i - 1].tSec) - double(tp[i].frame - tp[i - 1].frame) / kSr;
+        if (gap > 1e-6) {
+            ++jumps;
+            EXPECT_NEAR(gap, double(f.inputDroppedFrames()) / kSr, 1e-9);
+        }
+    }
+    EXPECT_EQ(jumps, 1);
+    EXPECT_GE(f.xruns(), 1u);
+}
+
+TEST(Session, InputOverflowKeepsTimingAndWarns) {
+    FakeBackend::Options o;
+    o.speed = 20;
+    o.backpressure = true;
+    o.noiseSigma = 0.002;
+    auto fake = std::make_unique<FakeBackend>(o);
+    FakeBackend* f = fake.get();
+    Session s(std::move(fake));
+    const SessionConfig cfg = training(120);
+    ClickScheduler cs(kSr, cfg.bpm, cfg.countIn);
+    const double t0 = f->nowSec();
+    std::vector<double> known;
+    for (int k = 0; k < 16; ++k) {
+        known.push_back(12.0 + jitterMs(k));
+        f->scheduleNote(beatTime(cs, t0, cfg.countIn + k, o.outputLatencySec) + known.back() / 1000.0, 41.2, 0.3);
+    }
+    // Slot k is audible at t0 + 3.1 + 0.5 k. Drop 0.3 s of input between slots 5 and 6
+    // (t0 + 5.75 .. ~6.05; slot 6 at 6.1 s).
+    f->dropInput(t0 + 5.75, 14400);
+    std::string err;
+    ASSERT_TRUE(s.start(cfg, err)) << err;
+    Collector c{s, {}};
+    ASSERT_TRUE(c.waitFor([&] { return c.slotsDone(18); }));
+    s.stop();
+    c.poll();
+    auto warnings = c.of(UiEvent::Warning);
+    ASSERT_EQ(warnings.size(), 1u);
+    EXPECT_EQ(warnings[0].text, "Entrada de áudio sobrecarregada: algumas notas podem ter sido ignoradas.");
+    EXPECT_EQ(c.count(UiEvent::Error), 0u);
+    EXPECT_EQ(c.count(UiEvent::Stopped), 1u);
+    EXPECT_EQ(c.all.back().type, UiEvent::Stopped);
+    int after = 0;
+    for (const auto& e : c.of(UiEvent::Note)) {
+        ASSERT_LT(e.n, 16);
+        EXPECT_NEAR(e.a, known[size_t(e.n)], 4.0) << "slot " << e.n;
+        after += e.n >= 6;
+    }
+    EXPECT_EQ(after, 10);  // every note after the gap was found and timed correctly
+    EXPECT_EQ(c.count(UiEvent::Extra), 0u);
+}
+
+TEST(Session, NaturalInputOverflowWarnsAndContinues) {
+    FakeBackend::Options o;
+    o.speed = 200;            // far faster than the analysis thread's 1 ms idle sleep allows
+    o.backpressure = false;
+    o.inputCapacity = 512;    // about one block: every analysis nap overflows
+    o.noiseSigma = 0.002;
+    auto fake = std::make_unique<FakeBackend>(o);
+    FakeBackend* f = fake.get();
+    Session s(std::move(fake));
+    std::string err;
+    ASSERT_TRUE(s.start(training(120), err)) << err;
+    Collector c{s, {}};
+    const double t0 = f->nowSec();
+    ASSERT_TRUE(c.waitFor([&] { return f->nowSec() > t0 + 12.0 && c.count(UiEvent::Warning) >= 1; }));
+    EXPECT_GT(f->inputDroppedFrames(), 0u);
+    // Rate limited: at most one warning per 5 s of backend time.
+    EXPECT_LE(c.count(UiEvent::Warning), size_t((f->nowSec() - t0) / 5.0) + 1);
+    EXPECT_EQ(c.count(UiEvent::Stopped), 0u);  // non-fatal
+    const size_t beats = c.count(UiEvent::Beat);
+    ASSERT_TRUE(c.waitFor([&] { return c.count(UiEvent::Beat) > beats; }));  // still running
+    s.stop();
+    c.poll();
+    EXPECT_EQ(c.count(UiEvent::Stopped), 1u);
+}
+
+// ---------------------------------------------------------------- event ordering / recording
+
+TEST(Session, StoppedPrecedesNextSessionEvents) {
+    FakeBackend::Options o;
+    o.speed = 20;
+    o.backpressure = true;
+    auto fake = std::make_unique<FakeBackend>(o);
+    FakeBackend* f = fake.get();
+    Session s(std::move(fake));
+    std::string err;
+    ASSERT_TRUE(s.start(training(), err)) << err;
+    double t0 = f->nowSec();
+    ASSERT_TRUE(waitUntil([&] { return f->nowSec() > t0 + 1.0; }));
+    s.stop();
+    // Restart in tuner mode WITHOUT polling: tuner events belong only to the second session.
+    SessionConfig tc = training();
+    tc.mode = Mode::Tuner;
+    tc.instrument = &instrument("guitarra");
+    tc.tuning = tc.instrument->tunings.front();
+    f->scheduleNote(f->nowSec() + 0.1, 110.0, 0.4);
+    ASSERT_TRUE(s.start(tc, err)) << err;
+    t0 = f->nowSec();
+    ASSERT_TRUE(waitUntil([&] { return f->nowSec() > t0 + 0.5; }));
+    Collector c{s, {}};
+    ASSERT_TRUE(c.waitFor([&] { return c.count(UiEvent::Tuner) >= 2 && c.count(UiEvent::Stopped) == 1; }));
+    size_t stoppedAt = 0;
+    for (size_t i = 0; i < c.all.size(); ++i)
+        if (c.all[i].type == UiEvent::Stopped) stoppedAt = i;
+    for (size_t i = 0; i < stoppedAt; ++i) EXPECT_NE(c.all[i].type, UiEvent::Tuner) << "event " << i;
+    for (size_t i = stoppedAt + 1; i < c.all.size(); ++i) {
+        EXPECT_NE(c.all[i].type, UiEvent::Beat) << "event " << i;  // no stale training events
+    }
+    s.stop();
+}
+
+TEST(Session, FailureStoppedIsLastEvent) {
+    // Regression guard: after a device failure nothing of that session follows Stopped.
+    FakeBackend::Options o;
+    o.speed = 20;
+    o.backpressure = true;
+    o.noiseSigma = 0.01;
+    auto fake = std::make_unique<FakeBackend>(o);
+    FakeBackend* f = fake.get();
+    Session s(std::move(fake));
+    for (int round = 0; round < 5; ++round) {
+        std::string err;
+        ASSERT_TRUE(s.start(training(), err)) << err;
+        Collector c{s, {}};
+        const double t0 = f->nowSec();
+        ASSERT_TRUE(c.waitFor([&] { return f->nowSec() > t0 + 0.3 + 0.1 * round; }));
+        f->simulateFailure();
+        ASSERT_TRUE(c.waitFor([&] { return c.count(UiEvent::Stopped) == 1; }));
+        const double tf = f->nowSec();
+        ASSERT_TRUE(c.waitFor([&] { return f->nowSec() > tf + 0.2; }));
+        s.stop();
+        c.poll();
+        ASSERT_FALSE(c.all.empty());
+        EXPECT_EQ(c.all.back().type, UiEvent::Stopped) << "round " << round;
+        EXPECT_EQ(c.count(UiEvent::Stopped), 1u);
+    }
+}
+
+TEST(Session, StopDiscardsPendingRecording) {
+    FakeBackend::Options o;
+    o.speed = 20;
+    o.backpressure = true;
+    o.noiseSigma = 0.01;
+    auto fake = std::make_unique<FakeBackend>(o);
+    FakeBackend* f = fake.get();
+    Session s(std::move(fake));
+    const auto path = (std::filesystem::temp_directory_path() / "treino_cancelled.wav").string();
+    std::filesystem::remove(path);
+    std::string err;
+    ASSERT_TRUE(s.start(training(), err)) << err;
+    Collector c{s, {}};
+    // The device fails: no more input, so the analysis thread can never take the request.
+    f->simulateFailure();
+    ASSERT_TRUE(c.waitFor([&] { return c.count(UiEvent::Stopped) == 1; }));
+    s.recordSample(path, 0.2);
+    s.stop();  // must discard the request
+    ASSERT_TRUE(s.start(training(), err)) << err;
+    const double t0 = f->nowSec();
+    ASSERT_TRUE(c.waitFor([&] { return f->nowSec() > t0 + 1.0; }));
+    s.stop();
+    c.poll();
+    // Requests made while no session runs are ignored too.
+    s.recordSample(path, 0.2);
+    ASSERT_TRUE(s.start(training(), err)) << err;
+    const double t1 = f->nowSec();
+    ASSERT_TRUE(c.waitFor([&] { return f->nowSec() > t1 + 1.0; }));
+    s.stop();
+    EXPECT_FALSE(std::filesystem::exists(path));
+    std::filesystem::remove(path);
 }

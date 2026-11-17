@@ -13,6 +13,8 @@ constexpr double kSampleRate = 48000.0;
 constexpr int64_t kLevelEvery = 2400;  // input frames per Level event (~20 Hz)
 constexpr double kBeatLeadSec = 0.3;   // Beat events are emitted this far ahead
 constexpr double kSummaryEverySec = 0.25;
+constexpr double kWarnEverySec = 5.0;
+const char* const kOverloadText = "Entrada de áudio sobrecarregada: algumas notas podem ter sido ignoradas.";
 constexpr size_t kMaxRecordFrames = size_t(600 * kSampleRate);  // 10 min cap
 constexpr auto kAnalysisIdle = std::chrono::milliseconds(1);
 constexpr auto kScoringTick = std::chrono::milliseconds(2);
@@ -79,9 +81,16 @@ bool Session::start(const SessionConfig& cfg, std::string& err) {
     drain(backend_->inputTimes());
     drain(backend_->outputTimes());
     drain(onsets_);
+    // Previous session's events: Level/Tuner leftovers are stale and dropped; scoring leftovers
+    // (ending with its Stopped) are kept, ahead of anything of the new session.
+    drain(anaEvents_);
+    {
+        UiEvent e;
+        while (scoEvents_.read(&e, 1) == 1) carry_.push_back(std::move(e));
+    }
 
     gain_ = std::pow(10.0, cfg.gainDb / 20.0);
-    inMap_ = std::make_unique<ClockMap>();
+    inTimeline_ = std::make_unique<InputTimeline>(kSampleRate);
     outMap_ = std::make_unique<ClockMap>();
     clicks_.reset();
     onset_.reset();
@@ -127,6 +136,7 @@ void Session::stop() {
     analysis_.join();
     scoring_.join();
     backend_->setRenderer(nullptr);
+    delete recReq_.exchange(nullptr, std::memory_order_acq_rel);  // never started: cancelled
     // The scoring thread is gone, so this thread is now the only producer of scoEvents_.
     if (!stoppedEmitted_.load(std::memory_order_acquire)) {
         UiEvent e;
@@ -138,11 +148,20 @@ void Session::stop() {
 
 bool Session::pollEvents(std::vector<UiEvent>& out) {
     const size_t before = out.size();
+    for (auto& c : carry_) out.push_back(std::move(c));
+    carry_.clear();
     UiEvent e;
-    // Analysis events first: after a device failure the analysis thread has finished before
-    // the scoring thread emits Stopped, so Stopped stays last.
     while (anaEvents_.read(&e, 1) == 1) out.push_back(std::move(e));
-    while (scoEvents_.read(&e, 1) == 1) out.push_back(std::move(e));
+    while (scoEvents_.read(&e, 1) == 1) {
+        if (e.type == UiEvent::Stopped) {
+            // Every analysis event of this session was written before Stopped (the analysis
+            // thread had finished), and no next session can be running here (start() moves a
+            // pending Stopped to carry_): drain them now so that Stopped is last.
+            UiEvent a;
+            while (anaEvents_.read(&a, 1) == 1) out.push_back(std::move(a));
+        }
+        out.push_back(std::move(e));
+    }
     std::vector<std::string> failed;
     {
         std::lock_guard<std::mutex> lk(failMutex_);
@@ -163,7 +182,7 @@ GridScorer::Summary Session::summary() const {
 }
 
 void Session::recordSample(const std::string& wavPath, double seconds) {
-    if (!(seconds > 0.0)) return;
+    if (!active_ || !(seconds > 0.0)) return;
     const size_t n = std::min(kMaxRecordFrames, size_t(std::llround(seconds * kSampleRate)));
     if (n == 0) return;
     auto* r = new Recording{wavPath, std::vector<float>(n), 0};
@@ -294,6 +313,8 @@ void Session::scoringLoop() {
     const bool training = cfg_.mode == Mode::Training;
     int64_t nextBeat = 0;
     double lastRefresh = -std::numeric_limits<double>::infinity();
+    double lastWarn = -std::numeric_limits<double>::infinity();
+    uint64_t warnedDropped = 0;
     bool dirty = true;
     auto emit = [this](UiEvent::Type t, int64_t n, double a, double b) {
         UiEvent e;
@@ -320,19 +341,36 @@ void Session::scoringLoop() {
             break;
         }
         size_t n;
-        while ((n = backend_->inputTimes().read(tp.data(), tp.size())) > 0)
-            for (size_t i = 0; i < n; ++i) inMap_->add(tp[i]);
+        while ((n = backend_->inputTimes().read(tp.data(), tp.size())) > 0) {
+            // Read the drop counter AFTER the points: it then covers every drop before them.
+            const uint64_t dropped = backend_->inputDroppedFrames();
+            for (size_t i = 0; i < n; ++i) inTimeline_->add(tp[i], dropped);
+        }
+        const uint64_t dropped = backend_->inputDroppedFrames();
+        if (dropped > warnedDropped) {
+            // One Warning per overload episode: drops within 5 s of the last Warning are
+            // covered by it.
+            const double now = backend_->nowSec();
+            if (now - lastWarn >= kWarnEverySec) {
+                UiEvent w;
+                w.type = UiEvent::Warning;
+                w.text = kOverloadText;
+                pushScoring(w, false);
+            }
+            lastWarn = now;
+            warnedDropped = dropped;
+        }
         while ((n = backend_->outputTimes().read(tp.data(), tp.size())) > 0)
             for (size_t i = 0; i < n; ++i) outMap_->add(tp[i]);
 
         if (training) {
-            const bool ready = inMap_->ready() && outMap_->ready();
+            const bool ready = !inTimeline_->empty() && outMap_->ready();
             // Load the progress BEFORE draining: every onset up to `analysed` is then drained.
             const int64_t analysed = analysedFrames_.load(std::memory_order_acquire);
             while ((n = onsets_.read(ons.data(), ons.size())) > 0) {
                 for (size_t i = 0; i < n; ++i) {
-                    if (!ready) continue;  // only during the first ~0.5 s (detector warm-up)
-                    const double t = inMap_->timeOf(double(ons[i]));
+                    if (!ready) continue;  // only before the output ClockMap is ready (< 0.5 s)
+                    const double t = inTimeline_->timeOf(double(ons[i]));
                     if (!std::isfinite(t)) continue;
                     if (auto ev = scorer_->onNote(t)) {
                         emit(ev->kind == ScoreEvent::Hit ? UiEvent::Note : UiEvent::Extra, ev->slot, ev->errorMs, ev->score);
@@ -344,7 +382,7 @@ void Session::scoringLoop() {
                 // "Now" for finalisation = capture time of the last analysed frame, so a slot
                 // is never finalised before its onset could have been analysed.
                 misses.clear();
-                scorer_->advance(inMap_->timeOf(double(analysed)), misses);
+                scorer_->advance(inTimeline_->timeOf(double(analysed)), misses);
                 for (const auto& m : misses) emit(UiEvent::Miss, m.slot, 0.0, 0.0);
                 dirty = dirty || !misses.empty();
             }

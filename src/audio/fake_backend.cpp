@@ -32,6 +32,15 @@ bool FakeBackend::start(std::string& err) {
     t0_ = now_.load(std::memory_order_relaxed);
     failed_.store(false, std::memory_order_relaxed);
     xruns_.store(0, std::memory_order_relaxed);
+    dropped_.store(0, std::memory_order_relaxed);
+    dropBegin_ = dropEnd_ = 0;
+    const int64_t dropAt = std::llround((dropAtSec_ - t0_ + o_.inputLatencySec) * kSampleRate);
+    if (dropFrames_ > 0 && dropAt >= 0) {
+        dropBegin_ = dropAt;
+        const int64_t last = dropBegin_ + int64_t(dropFrames_) - 1;
+        dropEnd_ = (last / int64_t(kBlock) + 1) * int64_t(kBlock);
+    }
+    dropFrames_ = 0;  // one-shot
     stopReq_.store(false, std::memory_order_relaxed);
     captured_.clear();  // keeps the reserved capacity
     running_ = true;
@@ -109,6 +118,7 @@ void FakeBackend::run() {
     auto base = clock::now();
     int64_t k = 0;      // blocks produced
     int64_t paced = 0;  // blocks since `base`
+    int64_t delivered = 0;  // input frames written to input_
     while (!stopReq_.load(std::memory_order_acquire)) {
         std::this_thread::sleep_until(base + std::chrono::duration_cast<clock::duration>(blockWall * double(paced + 1)));
         ++paced;
@@ -138,12 +148,23 @@ void FakeBackend::run() {
         const TimePoint op{first, t0_ + double(first) / kSampleRate + o_.outputLatencySec};
         outTimes_.write(&op, 1);
 
-        // Input.
+        // Input. TimePoint frames count frames written to input_ (`delivered`); dropped frames
+        // only move the capture time forward.
         renderInput(in_.data(), kBlock, first);
-        if (input_.write(in_.data(), kBlock) < kBlock) xruns_.fetch_add(1, std::memory_order_relaxed);
         const int64_t end = first + int64_t(kBlock);
-        const TimePoint ip{end, t0_ + double(end) / kSampleRate - o_.inputLatencySec};
-        inTimes_.write(&ip, 1);
+        size_t allowed = kBlock;
+        if (end > dropBegin_ && first < dropEnd_) allowed = size_t(std::max<int64_t>(0, dropBegin_ - first));
+        const size_t written = input_.write(in_.data(), allowed);
+        if (written < kBlock) {
+            dropped_.fetch_add(kBlock - written, std::memory_order_release);
+            xruns_.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (written > 0) {
+            delivered += int64_t(written);
+            const double t = t0_ + double(first + int64_t(written)) / kSampleRate - o_.inputLatencySec;
+            const TimePoint ip{delivered, t};
+            inTimes_.write(&ip, 1);
+        }
 
         ++k;
         now_.store(t0_ + double(end) / kSampleRate, std::memory_order_release);
