@@ -26,5 +26,10 @@ add_library(treino_core STATIC ${TREINO_CORE_SOURCES})
 target_include_directories(treino_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_compile_features(treino_core PUBLIC cxx_std_20)
 
+# PipeWire (audio backend). Headers come from the system; nothing is downloaded.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
+target_link_libraries(treino_core PUBLIC PkgConfig::PIPEWIRE)
+
 enable_testing()
 add_subdirectory(tests)
