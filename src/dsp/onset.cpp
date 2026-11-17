@@ -5,17 +5,22 @@
 
 namespace {
 constexpr size_t kEnvHistory = 10000;  // 10 s of 1 ms steps
-// Noise floor = p3 of the last 10 s of envelope. p20 over 5 s tracked note-level energy when
-// notes sound >= ~80% of the time (sustained bass), pushing 5x floor above the note RMS and
-// losing onsets; a low percentile over a longer span still lands in the gaps/quiet moments.
+// Noise floor = p3 of the last 10 s of the RAW 5 ms RMS (not the held envelope). p20 over 5 s
+// tracked note-level energy when notes sound >= ~80% of the time (sustained bass), pushing
+// 5x floor above the note RMS and losing onsets; a low percentile over a longer span still
+// lands in the gaps/quiet moments -- as long as there are gaps (see kGateRatio below).
 constexpr double kFloorPercentile = 0.03;
-constexpr size_t kDbHistory = 64;      // power of two; needs >= 16 (rise) and >= 21 (walk-back)
+// Power of two. Indexed back by up to kHold - 1 (peak-hold), kRiseSteps (rise), kHold (baseline
+// window) and kMaxWalkBack + 1 (walk-back) steps, so it needs >= kHold + 1 = 37 entries.
+constexpr size_t kDbHistory = 64;
 // Ripple suppression. A 5 ms RMS window is only ~20% of the period of a 41 Hz note (24 ms;
 // 30.9 Hz: 32 ms), so its output oscillates within each cycle and the rise criterion fired on
-// the ripple. The decision (threshold, floor, rise) therefore uses the peak-hold of the 5 ms
-// RMS over 36 steps (> one period of 30 Hz), which is flat on a sustained low sine; the short
-// 5 ms envelope is still used to walk back to the attack start, keeping the timing sharp.
+// the ripple. The decision (threshold, peak reference, rise) therefore uses the peak-hold of
+// the 5 ms RMS over 36 steps (> one period of 30 Hz), which is flat on a sustained low sine;
+// the short 5 ms envelope is still used for the noise floor and to walk back to the attack
+// start, keeping the timing sharp.
 constexpr int64_t kHold = 36;
+static_assert(kDbHistory > size_t(kHold), "dB ring must hold the kHold + 1 steps read back");
 constexpr double kBaseDb = 1.0;
 constexpr int64_t kRecompute = 500;
 constexpr int64_t kRiseSteps = 15;
@@ -26,6 +31,20 @@ constexpr float kStepDb = 0.2f;
 constexpr double kFloorMult = 5.0;
 constexpr int64_t kResync = 1000;  // steps between exact recomputations of the running sum
 constexpr double kPeakFrac = 0.12;
+// Floor-term gate (continuous playing). The floor term 5 x p3 assumes the 10 s window holds
+// some real silence. When the player never stops (e.g. 120 BPM, tau 0.4 s: the level falls only
+// ~11 dB between plucks), p3 converges to the INTER-NOTE level and 5 x p3 (+14 dB) ends above
+// the note peaks: detection collapsed ~11 s into the take. Measured p99(held)/p3(raw) over the
+// window: stationary noise 2.0-2.3 dB (sigma 6e-4..0.1), 50/60 Hz hum + noise at -39 dBFS
+// 3.7-5.3 dB, but >= 10.8 dB for every continuous tau = 0.4 take (41-247 Hz, sine/harmonic,
+// replace/overlap). So when p99 > kGateRatio x p3 the window holds signal that stationary noise
+// cannot produce, p3 may be a note tail rather than noise, and the floor term is capped at
+// kGateCap x p99 (it still applies in full when it is lower, e.g. weak notes over real silence,
+// where 5 x p3 is far below the notes). Below the gate (noise, hum) nothing changes: 5 x p3.
+// Capping only weakens a second guard: the 6 dB / 15 ms rise on the held envelope alone gave 0
+// false onsets in 2 h of noise and hum (sigma 6e-4..0.1, 50/60 Hz) with no floor term at all.
+constexpr double kGateRatio = 2.5;  // 8 dB
+constexpr double kGateCap = 0.25;   // -12 dB below the peak reference
 }  // namespace
 
 OnsetDetector::OnsetDetector(double sampleRate)
@@ -72,7 +91,9 @@ void OnsetDetector::updateThreshold() {
     double floorEnv = percentile(lin_.data(), n, kFloorPercentile);
     for (size_t i = 0; i < n; ++i) lin_[i] = env_[(start + i) % kEnvHistory];
     double peakEnv = percentile(lin_.data(), n, 0.99);
-    thr_ = std::max(kFloorMult * floorEnv, kPeakFrac * peakEnv);
+    double floorTerm = kFloorMult * floorEnv;
+    if (peakEnv > kGateRatio * floorEnv) floorTerm = std::min(floorTerm, kGateCap * peakEnv);
+    thr_ = std::max(floorTerm, kPeakFrac * peakEnv);
     haveThr_ = true;
 }
 
