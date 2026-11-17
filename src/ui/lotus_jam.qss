@@ -1,0 +1,247 @@
+/* Lotus Jam — folha de estilo global (briefing §2 e §6). Tokens: ver src/ui/theme.h. */
+
+/* ---- Base do briefing §6 ---- */
+QMainWindow, QWidget {
+    background-color: #09090B;
+    color: #F4F4F6;
+    font-family: "Inter", "Noto Sans", sans-serif;
+    font-size: 13px;
+}
+
+QFrame#CardPanel {
+    background-color: #111115;
+    border: 1px solid #262630;
+    border-radius: 10px;
+}
+
+QPushButton {
+    background-color: #191920;
+    color: #F4F4F6;
+    border: 1px solid #2E2E3A;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-weight: 600;
+}
+
+QPushButton:hover {
+    border-color: #FF2A85;
+    background-color: #20161E;
+}
+
+QPushButton#PrimaryAction {
+    background-color: #FF2A85;
+    color: #FFFFFF;
+    border: none;
+    font-weight: 700;
+}
+
+QPushButton#PrimaryAction:hover {
+    background-color: #FF4797;
+}
+
+QPushButton#PrimaryAction[running="true"] {
+    background-color: #1F1218;
+    color: #FF2A85;
+    border: 1px solid #FF2A85;
+}
+
+QComboBox, QSpinBox, QDoubleSpinBox {
+    background-color: #191920;
+    color: #F4F4F6;
+    border: 1px solid #2A2A35;
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+
+QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+    border-color: #FF2A85;
+}
+
+QTabBar::tab {
+    background: transparent;
+    color: #9E9EA9;
+    padding: 10px 18px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    border-bottom: 2px solid transparent;
+}
+
+QTabBar::tab:selected {
+    color: #FF2A85;
+    border-bottom: 2px solid #FF2A85;
+}
+
+/* ---- Complementos Lotus Jam ---- */
+
+/* Labels and layout-only containers show the surface behind them (cards, header). */
+QLabel { background-color: transparent; }
+QWidget#Field { background-color: transparent; }
+
+QFrame#Header {
+    background-color: #111115;
+    border: 1px solid #262630;
+    border-radius: 12px;
+}
+
+QLabel#Brand {
+    font-size: 19px;
+    font-weight: 800;
+    letter-spacing: 3px;
+    color: #F4F4F6;
+}
+
+/* Engine status badge. */
+QLabel#EngineBadge {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 3px 9px;
+    border-radius: 9px;
+    color: #9E9EA9;
+    background-color: #191920;
+    border: 1px solid #262630;
+}
+QLabel#EngineBadge[state="starting"] { color: #FFB800; border-color: #5A4300; }
+QLabel#EngineBadge[state="running"]  { color: #FF2A85; background-color: #1F1218; border-color: #3F1D32; }
+QLabel#EngineBadge[state="failed"]   { color: #FF1744; border-color: #5A0F1E; }
+
+QLabel[role="caption"] {
+    color: #9E9EA9;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+QLabel[role="cardTitle"] {
+    color: #9E9EA9;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+}
+
+/* Numbers: monospace stack (tabular digits). */
+QSpinBox, QDoubleSpinBox {
+    font-family: "JetBrains Mono", "Fira Code", "Noto Sans Mono", monospace;
+}
+QSpinBox#BpmSpin {
+    font-size: 18px;
+    font-weight: 700;
+    padding: 4px 8px;
+}
+QSpinBox, QDoubleSpinBox { padding-right: 22px; }
+QSpinBox::up-button, QDoubleSpinBox::up-button,
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    width: 20px;
+    background-color: #20202A;
+    border-left: 1px solid #2A2A35;
+}
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-position: top right;
+    border-top-right-radius: 6px;
+    border-bottom: 1px solid #2A2A35;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-position: bottom right;
+    border-bottom-right-radius: 6px;
+}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover { background-color: #3F1D32; }
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow { image: url(:/icons/chevron_up.svg); width: 10px; height: 6px; }
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow { image: url(:/icons/chevron_down.svg); width: 10px; height: 6px; }
+QComboBox { padding-right: 24px; }
+QComboBox::drop-down {
+    subcontrol-origin: border;
+    subcontrol-position: center right;
+    width: 22px;
+    border: none;
+    background: transparent;
+}
+QComboBox::down-arrow { image: url(:/icons/chevron_down.svg); width: 10px; height: 6px; }
+QComboBox QAbstractItemView {
+    background-color: #191920;
+    color: #F4F4F6;
+    border: 1px solid #3F1D32;
+    selection-background-color: #3F1D32;
+    selection-color: #F4F4F6;
+}
+QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QPushButton:disabled {
+    color: #5C5C68;
+    border-color: #1F1F27;
+}
+
+QPushButton#PrimaryAction {
+    border-radius: 18px;
+    padding: 9px 26px;
+    font-size: 14px;
+}
+QPushButton#PrimaryAction:disabled {
+    background-color: #3F1D32;
+    color: #9E9EA9;
+}
+QPushButton#RefreshButton {
+    font-size: 16px;
+    padding: 4px 0px;
+}
+
+/* Score tiles. */
+QFrame#StatTile {
+    background-color: #191920;
+    border: 1px solid #262630;
+    border-radius: 8px;
+}
+QFrame#StatTile QLabel { background-color: transparent; }
+QLabel[role="statValue"] {
+    font-family: "JetBrains Mono", "Fira Code", "Noto Sans Mono", monospace;
+    font-size: 28px;
+    font-weight: 700;
+    color: #F4F4F6;
+}
+QLabel[role="statValue"][accent="true"] { color: #FF2A85; }
+QLabel[role="statUnit"] {
+    font-family: "JetBrains Mono", "Fira Code", "Noto Sans Mono", monospace;
+    font-size: 13px;
+    color: #9E9EA9;
+}
+
+/* Recording indicator. */
+QLabel#RecIndicator { font-weight: 700; padding: 0 6px 8px 0; }
+QLabel#RecIndicator[state="recording"] { color: #FF1744; }
+QLabel#RecIndicator[state="done"]      { color: #9E9EA9; }
+
+/* Error banner (UiEvent::Error) and discreet warning (UiEvent::Warning). */
+QLabel#ErrorBanner {
+    background-color: #FF1744;
+    color: #FFFFFF;
+    font-weight: 700;
+    padding: 8px 14px;
+    border-radius: 8px;
+}
+QLabel#WarningNotice {
+    background-color: #1A1408;
+    color: #FFB800;
+    border: 1px solid #5A4300;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+}
+
+/* Tabs. */
+QTabWidget::pane { border: none; }
+QTabBar { background: transparent; }
+QTabBar::tab:hover:!selected { color: #F4F4F6; }
+
+/* Placeholders. */
+QLabel[role="placeholderTitle"] {
+    color: #3F1D32;
+    font-size: 28px;
+    font-weight: 800;
+    letter-spacing: 4px;
+}
+QLabel[role="placeholder"] { color: #5C5C68; font-size: 15px; }
+
+QToolTip {
+    background-color: #111115;
+    color: #F4F4F6;
+    border: 1px solid #3F1D32;
+    padding: 4px 8px;
+}

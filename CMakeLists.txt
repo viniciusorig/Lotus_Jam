@@ -31,5 +31,20 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(PIPEWIRE REQUIRED IMPORTED_TARGET libpipewire-0.3)
 target_link_libraries(treino_core PUBLIC PkgConfig::PIPEWIRE)
 
+# Lotus Jam front-end (Qt 6 Widgets). Kept out of treino_core, which stays Qt-free.
+find_package(Qt6 REQUIRED COMPONENTS Widgets Svg)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+
+file(GLOB LOTUS_UI_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/ui/*.cpp ${CMAKE_SOURCE_DIR}/src/ui/*.h)
+add_library(lotus_ui STATIC ${LOTUS_UI_SOURCES} ${CMAKE_SOURCE_DIR}/resources.qrc)
+target_include_directories(lotus_ui PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(lotus_ui PUBLIC treino_core Qt6::Widgets Qt6::Svg)
+# GridScorer::Summary has a member named `slots`: no Qt keyword macros (use Q_SIGNALS/Q_SLOTS/Q_EMIT).
+target_compile_definitions(lotus_ui PUBLIC QT_NO_KEYWORDS)
+
+add_executable(lotus-jam ${CMAKE_SOURCE_DIR}/src/main.cpp)
+target_link_libraries(lotus-jam PRIVATE lotus_ui)
+
 enable_testing()
 add_subdirectory(tests)

@@ -1,0 +1,14 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/">
+    <file alias="icons/lotus_jam.svg">resources/icons/lotus_jam.svg</file>
+    <file alias="icons/lotus_jam_16.png">resources/icons/lotus_jam_16.png</file>
+    <file alias="icons/lotus_jam_32.png">resources/icons/lotus_jam_32.png</file>
+    <file alias="icons/lotus_jam_64.png">resources/icons/lotus_jam_64.png</file>
+    <file alias="icons/lotus_jam_128.png">resources/icons/lotus_jam_128.png</file>
+    <file alias="icons/lotus_jam_256.png">resources/icons/lotus_jam_256.png</file>
+    <file alias="icons/chevron_up.svg">resources/icons/chevron_up.svg</file>
+    <file alias="icons/chevron_down.svg">resources/icons/chevron_down.svg</file>
+    <file alias="lotus_jam.qss">src/ui/lotus_jam.qss</file>
+  </qresource>
+</RCC>
