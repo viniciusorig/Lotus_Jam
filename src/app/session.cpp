@@ -343,8 +343,8 @@ void Session::scoringLoop() {
         size_t n;
         while ((n = backend_->inputTimes().read(tp.data(), tp.size())) > 0) {
             // Read the drop counter AFTER the points: it then covers every drop before them.
-            const uint64_t dropped = backend_->inputDroppedFrames();
-            for (size_t i = 0; i < n; ++i) inTimeline_->add(tp[i], dropped);
+            const uint64_t droppedNow = backend_->inputDroppedFrames();
+            inTimeline_->add(tp.data(), n, droppedNow, backend_->nowSec());
         }
         const uint64_t dropped = backend_->inputDroppedFrames();
         const uint64_t evictions = inTimeline_->evictions();
@@ -369,10 +369,14 @@ void Session::scoringLoop() {
         while ((n = backend_->outputTimes().read(tp.data(), tp.size())) > 0)
             for (size_t i = 0; i < n; ++i) outMap_->add(tp[i]);
 
+        int64_t pruneAt = 0;
         if (training) {
             const bool ready = !inTimeline_->empty() && outMap_->ready();
             // Load the progress BEFORE draining: every onset up to `analysed` is then drained.
+            // The same value bounds pruning below: an onset written after this load (it may
+            // walk back before `analysed`) must still find its segment on the next tick.
             const int64_t analysed = analysedFrames_.load(std::memory_order_acquire);
+            pruneAt = analysed;
             while ((n = onsets_.read(ons.data(), ons.size())) > 0) {
                 for (size_t i = 0; i < n; ++i) {
                     if (!ready) continue;  // only before the output ClockMap is ready (< 0.5 s)
@@ -411,8 +415,9 @@ void Session::scoringLoop() {
                 dirty = false;
             }
         }
-        // Segments behind the analysis are no longer needed (memory stays bounded).
-        inTimeline_->prune(analysedFrames_.load(std::memory_order_acquire));
+        // Segments behind the analysis are no longer needed (memory stays bounded). Training
+        // uses the progress loaded before draining the onsets (see above).
+        inTimeline_->prune(training ? pruneAt : analysedFrames_.load(std::memory_order_acquire));
         std::this_thread::sleep_for(kScoringTick);
     }
     refreshSummary();

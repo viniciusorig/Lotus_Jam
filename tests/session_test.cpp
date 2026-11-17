@@ -727,8 +727,9 @@ TEST(FakeBackend, SeveralDropWindows) {
 TEST(Session, RepeatedDropsWhileAnalysisLagsKeepTiming) {
     // Backpressure at a very high speed keeps the input ring full, so the analysis runs
     // ~2.7 s (the ring) behind the TimePoints the scoring thread has already read. Every beat
-    // interval has 8 partial-block drops, so ~40 gaps lie between the analysis position and
-    // the head at any time: onsets must still map through their own segment.
+    // interval has 4 partial-block drops, so ~22 gaps lie between the analysis position and
+    // the head at any time (well under the 64-segment cap, so nothing is evicted): onsets must
+    // still map through their own segment.
     FakeBackend::Options o;
     o.speed = 1000;
     o.backpressure = true;
@@ -744,7 +745,7 @@ TEST(Session, RepeatedDropsWhileAnalysisLagsKeepTiming) {
         known.push_back(12.0 + jitterMs(k));
         const double note = beatTime(cs, t0, cfg.countIn + k, o.outputLatencySec) + known.back() / 1000.0;
         f->scheduleNote(note, 41.2, 0.3);
-        for (int j = 0; j < 8; ++j) f->dropInput(note + 0.12 + 0.035 * j, 100);  // in the decay
+        for (int j = 0; j < 4; ++j) f->dropInput(note + 0.12 + 0.07 * j, 100);  // in the decay
     }
     std::string err;
     ASSERT_TRUE(s.start(cfg, err)) << err;
@@ -753,8 +754,8 @@ TEST(Session, RepeatedDropsWhileAnalysisLagsKeepTiming) {
     s.stop();
     c.poll();
     // Each window drops from its start to the end of its block: 100..579 frames.
-    EXPECT_GE(f->inputDroppedFrames(), 16u * 8u * 100u);
-    EXPECT_LT(f->inputDroppedFrames(), 16u * 8u * 580u);
+    EXPECT_GE(f->inputDroppedFrames(), 16u * 4u * 100u);
+    EXPECT_LT(f->inputDroppedFrames(), 16u * 4u * 580u);
     int notes = 0;
     for (const auto& e : c.of(UiEvent::Note)) {
         ASSERT_LT(e.n, 16);

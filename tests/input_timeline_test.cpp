@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "app/input_timeline.h"
@@ -173,4 +174,88 @@ TEST(InputTimeline, SubThresholdDropDoesNotStayPending) {
         EXPECT_FALSE(tl.add({d, t + (k % 2 ? 1e-3 : -1e-3)}, f.dropped)) << "block " << k;
     }
     EXPECT_EQ(tl.segments(), segs);
+}
+
+// ---------------------------------------------------------------- fix round 3: jitter
+
+namespace {
+// The reviewer's probe: 300 blocks with +-0.2 ms timestamp jitter, a 960-frame (20 ms) drop
+// whose post-drop point carries `postJitter`, then 300 more jittered blocks. The timeline is
+// queried after every block (like the lagging analysis would). Returns the worst error (s)
+// over frames from 200 blocks before the drop, and the final segment count.
+std::pair<double, size_t> jitteredDrop(double postJitter, int64_t dropFrames) {
+    InputTimeline tl(kSr);
+    int64_t produced = 0, delivered = 0;
+    uint64_t dropped = 0;
+    const double base = 2.0;
+    auto pt = [&](double j) { tl.add({delivered, base + double(produced) / kSr + j}, dropped); };
+    for (int k = 0; k < 300; ++k) {
+        produced += kBlock;
+        delivered += kBlock;
+        pt(k % 2 ? 0.2e-3 : -0.2e-3);
+    }
+    const int64_t dStart = delivered;
+    produced += dropFrames;
+    dropped += uint64_t(dropFrames);
+    produced += kBlock;
+    delivered += kBlock;
+    pt(postJitter);
+    double worst = 0;
+    for (int k = 0; k < 300; ++k) {
+        produced += kBlock;
+        delivered += kBlock;
+        pt(k % 2 ? 0.2e-3 : -0.2e-3);
+        for (int64_t f = dStart - 200 * kBlock; f < delivered; f += 97) {
+            const double truth = base + double(f + (f >= dStart ? dropFrames : 0)) / kSr;
+            worst = std::max(worst, std::fabs(tl.timeOf(double(f)) - truth));
+        }
+    }
+    return {worst, tl.segments()};
+}
+}  // namespace
+
+TEST(InputTimeline, JitteredPostDropPointStillSplits) {
+    // The jump of a drop is drop + (jitter after - jitter before): it must still be matched.
+    for (double jit : {0.0, 1.0e-3, 2.0e-3, -2.0e-3}) {
+        const auto [worst, segs] = jitteredDrop(jit, 960);
+        if (jit >= 0) {
+            EXPECT_EQ(segs, 2u) << "post-drop jitter " << jit * 1e3 << " ms";
+        } else {
+            // An early (negatively jittered) post-drop point hides part of the drop; the next
+            // point reveals that remainder, which is matched there (a one-point segment).
+            EXPECT_GE(segs, 2u);
+            EXPECT_LE(segs, 3u);
+        }
+        // Until the new segment's ClockMap is ready its times hang on the (jittered) first
+        // point: the error is bounded by that jitter plus the baseline jitter.
+        EXPECT_LE(worst, std::fabs(jit) + 0.3e-3) << "post-drop jitter " << jit * 1e3 << " ms";
+    }
+}
+
+TEST(InputTimeline, SmallDropHiddenByJitterIsAbsorbed) {
+    // A 10-frame (0.2 ms) drop under +-0.25 ms jitter: jumps of ~24 frames are pure jitter.
+    // The drop is too small to locate, so it must be absorbed into the fit (error <= its size
+    // plus jitter), never split the timeline, and drain so that later jitter cannot split.
+    InputTimeline tl(kSr);
+    int64_t produced = 0, delivered = 0;
+    uint64_t dropped = 0;
+    auto pt = [&](int k) {
+        return tl.add({delivered, 2.0 + double(produced) / kSr + (k % 2 ? 0.25e-3 : -0.25e-3)}, dropped);
+    };
+    int k = 0;
+    for (; k < 100; ++k) {
+        produced += kBlock;
+        delivered += kBlock;
+        EXPECT_FALSE(pt(k));
+    }
+    produced += 10;
+    dropped += 10;
+    for (; k < 400; ++k) {
+        produced += kBlock;
+        delivered += kBlock;
+        EXPECT_FALSE(pt(k)) << "block " << k;
+    }
+    EXPECT_EQ(tl.segments(), 1u);
+    const int64_t f = delivered - 50 * kBlock;
+    EXPECT_NEAR(tl.timeOf(double(f)), 2.0 + double(f + 10) / kSr, 0.5e-3);
 }

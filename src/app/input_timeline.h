@@ -18,14 +18,20 @@
 // points). Until a segment's ClockMap is ready its times use the nominal rate from the
 // segment's first point.
 //
-// Gap detection. `droppedSoFar` is the backend's cumulative dropped-frame counter read AFTER
-// the point was taken from the ring; `pending` = dropped frames not yet matched to a jump. A
-// jump g (frames) between consecutive points is a gap only while pending > 0 and
-//   min(kMinGapFrames, pending / 2) <= g <= pending + kMinGapFrames,
-// and it consumes min(g, pending). Without pending drops, timestamp jitter never splits. A
-// drop too small for its own jump to be told from jitter is matched by the next compatible
-// jump (at worst a spurious split that consumes it), so `pending` always drains and cannot
-// arm later jitter for the rest of the session.
+// Gap detection. `droppedSoFar` is the backend's cumulative dropped-frame counter, read AFTER
+// the batch of points was taken from the ring; `pending` = observed dropped frames not yet
+// matched to a jump. A jump g (frames) between consecutive points is a gap when
+//   min(g, pending) >= kMinGapFrames  and  g <= pending + kJitterFrames,
+// and it consumes min(g, pending). The measured jump of a drop is drop + (jitter after -
+// jitter before), so kJitterFrames (5 ms) allows for several ms of timestamp jitter; without
+// pending drops jitter never splits. Drops too small to locate (< kMinGapFrames, 0.5 ms) never
+// split: they are absorbed into the fit (error <= their size). Pending frames still unmatched
+// once a point captured more than kMatchSec after the observation (backend time, `nowSec`
+// passed with the batch) has been processed are absorbed too (a small drop, or the
+// jitter-hidden remainder of a matched one), so `pending` always drains and cannot arm later
+// jitter for long. This is safe whatever the batching or thread preemption: the increment
+// happened before the observation and the post-drop TimePoint is pushed at most one period
+// after the increment, so its capture time is before observation + one period.
 //
 // Memory and pruning. The scoring thread reads TimePoints up to the backend's head while the
 // analysis (and so the onsets) can lag by the whole input ring, so many gaps may lie between
@@ -42,31 +48,28 @@ public:
 
     explicit InputTimeline(double sampleRate) : sr_(sampleRate) {}
 
-    // Adds the next input TimePoint; true if it starts a new segment (a gap was detected).
-    bool add(TimePoint p, uint64_t droppedSoFar) {
-        if (segs_.empty()) {
-            segs_.push_back(Segment{std::numeric_limits<int64_t>::min(), p, ClockMap()});
-            segs_.back().map.add(p);
-            last_ = p;
-            return false;
-        }
-        const double pending = droppedSoFar > accounted_ ? double(droppedSoFar - accounted_) : 0.0;
-        const double gap = (p.tSec - last_.tSec) * sr_ - double(p.frame - last_.frame);
-        const double minGap = std::max(0.5, std::min(kMinGapFrames, 0.5 * pending));
-        bool split = false;
-        if (pending > 0.0 && gap >= minGap && gap <= pending + kMinGapFrames) {
-            accounted_ += uint64_t(std::llround(std::min(gap, pending)));
-            segs_.push_back(Segment{last_.frame, p, ClockMap()});
-            if (segs_.size() > kMaxSegments) {
-                segs_.pop_front();
-                ++evictions_;
+    // Adds a batch of consecutive input TimePoints read from the ring, with the dropped-frame
+    // counter and the backend clock read after that read. Returns how many new segments were
+    // started.
+    size_t add(const TimePoint* p, size_t n, uint64_t droppedSoFar, double nowSec) {
+        observed_ = std::max(observed_, droppedSoFar);
+        size_t splits = 0;
+        for (size_t i = 0; i < n; ++i) {
+            splits += addOne(p[i]) ? 1 : 0;
+            // Absorb amounts whose post-drop point must have been seen by now.
+            while (!obs_.empty() && p[i].tSec > obs_.front().tSec + kMatchSec) {
+                accounted_ = std::max(accounted_, obs_.front().value);
+                obs_.pop_front();
             }
-            split = true;
         }
-        segs_.back().map.add(p);
-        last_ = p;
-        return split;
+        if (observed_ > accounted_ && (obs_.empty() || observed_ > obs_.back().value)) {
+            if (obs_.size() == kMaxObs) obs_.pop_front();  // bound; the newest value covers it
+            obs_.push_back({observed_, nowSec});
+        }
+        return splits;
     }
+    // One point read on its own, observed at its own capture time; true if it splits.
+    bool add(TimePoint p, uint64_t droppedSoFar) { return add(&p, 1, droppedSoFar, p.tSec) > 0; }
 
     // Drops segments that end more than kKeepFrames before `analysedFrame`.
     void prune(int64_t analysedFrame) {
@@ -92,15 +95,47 @@ public:
     }
 
 private:
-    static constexpr double kMinGapFrames = 24.0;  // 0.5 ms at 48 kHz
+    bool addOne(TimePoint p) {
+        if (segs_.empty()) {
+            segs_.push_back(Segment{std::numeric_limits<int64_t>::min(), p, ClockMap()});
+            segs_.back().map.add(p);
+            last_ = p;
+            return false;
+        }
+        const double pending = observed_ > accounted_ ? double(observed_ - accounted_) : 0.0;
+        const double gap = (p.tSec - last_.tSec) * sr_ - double(p.frame - last_.frame);
+        const double match = std::min(gap, pending);
+        bool split = false;
+        if (match >= kMinGapFrames && gap <= pending + kJitterFrames) {
+            accounted_ += uint64_t(std::llround(match));
+            segs_.push_back(Segment{last_.frame, p, ClockMap()});
+            if (segs_.size() > kMaxSegments) {
+                segs_.pop_front();
+                ++evictions_;
+            }
+            split = true;
+        }
+        segs_.back().map.add(p);
+        last_ = p;
+        return split;
+    }
+
+    static constexpr double kMinGapFrames = 24.0;   // 0.5 ms at 48 kHz
+    static constexpr double kJitterFrames = 240.0;  // 5 ms timestamp-jitter allowance
+    static constexpr double kMatchSec = 0.05;       // > one period + timestamp jitter
+    static constexpr size_t kMaxObs = 64;
     struct Segment {
         int64_t start;  // first frame belonging to this segment
         TimePoint first;
         ClockMap map;
     };
+    struct Obs {
+        uint64_t value;  // counter value observed with a batch
+        double tSec;     // backend time of that observation
+    };
     double sr_;
     std::deque<Segment> segs_;
+    std::deque<Obs> obs_;  // <= kMaxObs entries
     TimePoint last_{0, 0.0};
-    uint64_t accounted_ = 0;
-    uint64_t evictions_ = 0;
+    uint64_t observed_ = 0, accounted_ = 0, evictions_ = 0;
 };
