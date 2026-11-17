@@ -9,7 +9,11 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QStandardPaths>
+#include <QAbstractItemView>
+#include <QFontMetrics>
 #include <QStyle>
+#include <QStyleOptionComboBox>
+#include <QStylePainter>
 #include <QTabBar>
 #include <QTabWidget>
 #include <QVBoxLayout>
@@ -62,17 +66,45 @@ QWidget* placeholder(const QString& title, const QString& text, QWidget* parent)
     return w;
 }
 
+// Combo box that elides the shown device description to its width (the popup and the
+// tooltips carry the full text).
+class ElidingComboBox : public QComboBox {
+public:
+    using QComboBox::QComboBox;
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QStylePainter p(this);
+        QStyleOptionComboBox opt;
+        initStyleOption(&opt);
+        p.drawComplexControl(QStyle::CC_ComboBox, opt);
+        const QRect field = style()->subControlRect(QStyle::CC_ComboBox, &opt, QStyle::SC_ComboBoxEditField, this);
+        opt.currentText = fontMetrics().elidedText(opt.currentText, Qt::ElideRight, field.width());
+        p.drawControl(QStyle::CE_ComboBoxLabel, opt);
+    }
+};
+
 void fillCombo(QComboBox* c, const std::vector<AudioDevice>& devs, int fallback) {
     const QString prev = c->currentData().toString();
     c->clear();
+    int widest = 0;
+    const QFontMetrics fm = c->view()->fontMetrics();
     for (const auto& d : devs) {
         const QString name = QString::fromStdString(d.name);
         const QString desc = d.description.empty() ? name : QString::fromStdString(d.description);
         c->addItem(desc, name);
-        c->setItemData(c->count() - 1, name, Qt::ToolTipRole);
+        c->setItemData(c->count() - 1, desc + "\n" + name, Qt::ToolTipRole);
+        widest = std::max(widest, fm.horizontalAdvance(desc));
     }
+    c->view()->setMinimumWidth(widest + 48);  // the popup shows full descriptions
+    c->setPlaceholderText(devs.empty() ? QString::fromUtf8("Nenhum dispositivo encontrado") : QString());
     const int keep = prev.isEmpty() ? -1 : c->findData(prev);
     c->setCurrentIndex(keep >= 0 ? keep : fallback);
+}
+
+void syncTooltip(QComboBox* c, const QString& fallback) {
+    const QString tip = c->currentIndex() >= 0 ? c->itemData(c->currentIndex(), Qt::ToolTipRole).toString() : QString();
+    c->setToolTip(tip.isEmpty() ? fallback : tip);
 }
 
 }  // namespace
@@ -152,12 +184,21 @@ void MainWindow::buildUi() {
     top->addWidget(badge_, 0, Qt::AlignVCenter);
     top->addStretch(1);
 
-    inCombo_ = new QComboBox(header);
-    inCombo_->setMinimumWidth(230);
+    inCombo_ = new ElidingComboBox(header);
+    outCombo_ = new ElidingComboBox(header);
+    for (QComboBox* c : {inCombo_, outCombo_}) {
+        c->setMinimumWidth(230);
+        c->setMaximumWidth(300);
+        c->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        c->setMinimumContentsLength(24);
+        c->setPlaceholderText(QString::fromUtf8("Procurando dispositivos…"));
+    }
     inCombo_->setToolTip("Dispositivo de entrada (PipeWire)");
-    outCombo_ = new QComboBox(header);
-    outCombo_->setMinimumWidth(230);
     outCombo_->setToolTip(QString::fromUtf8("Dispositivo de saída (PipeWire)"));
+    connect(inCombo_, &QComboBox::currentIndexChanged, this,
+            [this] { syncTooltip(inCombo_, "Dispositivo de entrada (PipeWire)"); });
+    connect(outCombo_, &QComboBox::currentIndexChanged, this,
+            [this] { syncTooltip(outCombo_, QString::fromUtf8("Dispositivo de saída (PipeWire)")); });
     refresh_ = new QPushButton(QString::fromUtf8("↻"), header);
     refresh_->setObjectName("RefreshButton");
     refresh_->setToolTip(QString::fromUtf8("Atualizar a lista de dispositivos"));
@@ -225,6 +266,8 @@ void MainWindow::buildUi() {
     connect(tempo_, &TempoTrainingView::recordRequested, this, &MainWindow::recordSample);
 }
 
+QStringList MainWindow::engineBadgeTexts() { return {"MOTOR PARADO", "INICIANDO", "MOTOR ATIVO", "FALHA"}; }
+
 void MainWindow::setEngine(Engine e) {
     switch (e) {
     case Engine::Idle:
@@ -245,6 +288,18 @@ void MainWindow::setEngine(Engine e) {
         break;
     }
     restyle(badge_);
+    // Fixed width = widest state text (QSS letter-spacing included in the polished font), so
+    // the badge never clips nor makes the header jump between states.
+    badge_->ensurePolished();
+    const QString current = badge_->text();
+    int widest = 0;
+    for (const QString& t : engineBadgeTexts()) {
+        badge_->setText(t);  // invalidates QLabel's cached size hint
+        widest = std::max(widest, badge_->sizeHint().width());
+    }
+    badge_->setText(current);
+    badge_->setAlignment(Qt::AlignCenter);
+    badge_->setFixedWidth(widest + 2);
 }
 
 void MainWindow::showError(const QString& text) {
@@ -268,7 +323,7 @@ void MainWindow::lockInputs(bool locked) {
 // ---- devices ----
 
 void MainWindow::refreshDevices() {
-    if (listing_) return;
+    if (listing_ || starting_ || running_) return;  // never re-list under a session
     if (listThread_.joinable()) listThread_.join();  // finished: its result was delivered
     listing_ = true;
     refresh_->setEnabled(false);
@@ -290,16 +345,19 @@ void MainWindow::onDevicesListed() {
         d = std::move(listed_);
     }
     listing_ = false;
-    refresh_->setEnabled(true);
+    refresh_->setEnabled(!starting_ && !running_);
     fillCombo(inCombo_, d.inputs, defaultInputIndex(d.inputs));
     fillCombo(outCombo_, d.outputs, defaultOutputIndex(d.outputs));
+    syncTooltip(inCombo_, "Dispositivo de entrada (PipeWire)");
+    syncTooltip(outCombo_, QString::fromUtf8("Dispositivo de saída (PipeWire)"));
     devicesReady_ = true;
+    tempo_->setStartAllowed(true);
 }
 
 // ---- session ----
 
 void MainWindow::startSession() {
-    if (starting_ || running_) return;
+    if (starting_ || running_ || !devicesReady_) return;  // Iniciar is disabled until the first scan
     if (!pollTimer_.isActive()) pollTimer_.start();  // stopped by a previous close
     if (!summaryTimer_.isActive()) summaryTimer_.start();
     poll();  // drain what is left of a previous session (its Stopped, a late WAV error)
@@ -339,6 +397,9 @@ void MainWindow::startSession() {
     tempo_->timeline()->clear();
     tempo_->summaryCard()->clear();
     level_->reset();
+    tempo_->setRecordingState(TempoTrainingView::Rec::None);
+    recPending_ = false;
+    userStop_ = false;
     starting_ = true;
     tempo_->setStarting(true);
     lockInputs(true);
@@ -369,8 +430,8 @@ void MainWindow::onStartFinished() {
         err = std::move(startErr_);
     }
     starting_ = false;
-    refresh_->setEnabled(!listing_);
     if (!ok) {
+        refresh_->setEnabled(!listing_);
         running_ = false;
         tempo_->setRunning(false);
         lockInputs(false);
@@ -385,26 +446,41 @@ void MainWindow::onStartFinished() {
 
 void MainWindow::stopSession() {
     if (starting_ || !session_) return;
+    userStop_ = true;
     session_->stop();
     poll();  // delivers the Stopped event (and the final summary) right away
 }
 
 void MainWindow::recordSample() {
     if (!running_ || !session_) return;
-    QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    if (dir.isEmpty()) dir = QDir::homePath() + "/.local/share/lotus-jam";
-    dir += "/amostras";
+    if (recPending_) return;
+    QString dir = sampleDir_;
+    if (dir.isEmpty()) {
+        dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        if (dir.isEmpty()) dir = QDir::homePath() + "/.local/share/lotus-jam";
+        dir += "/amostras";
+    }
     QDir().mkpath(dir);
     const QString path =
-        dir + "/amostra-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss") + ".wav";
-    session_->recordSample(path.toStdString(), 10.0);
-    tempo_->showRecording(path, 10.0);
+        dir + "/amostra-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss-zzz") + ".wav";
+    session_->recordSample(path.toStdString(), sampleSeconds_);
+    recPending_ = true;
+    recError_ = false;
+    recPath_ = path;
+    // Judged on the backend clock: the take plus a grace for the background WAV write (an
+    // Error from the writer arrives within it).
+    recDeadline_ = (backend_ ? backend_->nowSec() : 0.0) + sampleSeconds_ + kRecGraceSec;
+    tempo_->setRecordingState(TempoTrainingView::Rec::Recording, path);
 }
 
 void MainWindow::poll() {
     if (starting_ || !session_) return;
     events_.clear();
     if (session_->pollEvents(events_)) dispatchEvents(events_);
+    if (recPending_ && running_ && backend_ && backend_->nowSec() >= recDeadline_) {
+        recPending_ = false;
+        tempo_->setRecordingState(recError_ ? TempoTrainingView::Rec::Failed : TempoTrainingView::Rec::Saved, recPath_);
+    }
 }
 
 void MainWindow::dispatchEvents(const std::vector<UiEvent>& events) {
@@ -430,9 +506,9 @@ void MainWindow::dispatchEvents(const std::vector<UiEvent>& events) {
         case UiEvent::Level:
             peak = std::max(peak, e.a);
             break;
-        case UiEvent::Error:
+        case UiEvent::Error:  // the badge turns FALHA only on a device failure (see Stopped)
             showError(QString::fromStdString(e.text));
-            setEngine(Engine::Failed);
+            if (recPending_) recError_ = true;
             break;
         case UiEvent::Warning:
             showWarning(QString::fromStdString(e.text));
@@ -451,6 +527,11 @@ void MainWindow::dispatchEvents(const std::vector<UiEvent>& events) {
         if (session_) tempo_->summaryCard()->setSummary(session_->summary());
         level_->reset();
         tempo_->pulse()->idle();
-        if (errorBanner_->isHidden()) setEngine(Engine::Idle);
+        if (recPending_) {
+            recPending_ = false;
+            tempo_->setRecordingState(TempoTrainingView::Rec::Interrupted, recPath_);
+        }
+        // Not asked for by Parar: the device failed (its Error is already in the banner).
+        setEngine(userStop_ ? Engine::Idle : Engine::Failed);
     }
 }

@@ -7,7 +7,12 @@
 #include <QFontMetricsF>
 #include <QIcon>
 #include <QImage>
+#include <QAbstractItemView>
+#include <QDir>
+#include <QFileInfo>
 #include <QLabel>
+#include <QLocale>
+#include <QTemporaryDir>
 #include <QPixmap>
 #include <QPushButton>
 #include <QSpinBox>
@@ -15,7 +20,9 @@
 #include <QThread>
 #include <QTimer>
 
+#include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <memory>
@@ -26,6 +33,7 @@
 #include "audio/click_scheduler.h"
 #include "audio/fake_backend.h"
 #include "ui/device_select.h"
+#include "ui/level_meter.h"
 #include "ui/main_window.h"
 #include "ui/pulse_widget.h"
 #include "ui/score_summary_card.h"
@@ -83,12 +91,16 @@ double jitterMs(int k) {
 struct FakeFactory {
     FakeBackend* last = nullptr;
     int calls = 0;
+    double pauseAt = 0;
     std::string in, out;
     double speed = 4;
     int notes = 0;            // synthetic player: notes on the first scored beats
     int countInBeats = 4;     // must match the UI's count-in for the notes to land on the grid
     double bpm = 120;
     double offsetMs = 8;
+    // If > 0: the fake clock freezes this long after the audible time of the last scored note
+    // (FakeBackend::Options::pauseAtSec), so what is finalised does not depend on wall time.
+    double pauseAfterLastSec = 0;
 
     BackendFactory make() {
         return [this](const std::string& inNode, const std::string& outNode) -> std::unique_ptr<IAudioBackend> {
@@ -99,10 +111,13 @@ struct FakeFactory {
             o.speed = speed;
             o.backpressure = true;
             o.noiseSigma = 0.002;
+            ClickScheduler cs(kSr, bpm, countInBeats);
+            const double t0 = o.startSec;  // nowSec() is frozen at startSec until start()
+            if (pauseAfterLastSec > 0 && notes > 0)
+                o.pauseAtSec = beatTime(cs, t0, countInBeats + notes - 1, o.outputLatencySec) + pauseAfterLastSec;
+            pauseAt = o.pauseAtSec;
             auto f = std::make_unique<FakeBackend>(o);
             last = f.get();
-            ClickScheduler cs(kSr, bpm, countInBeats);
-            const double t0 = f->nowSec();  // frozen until start()
             for (int k = 0; k < notes; ++k)
                 f->scheduleNote(beatTime(cs, t0, countInBeats + k, o.outputLatencySec) + (offsetMs + jitterMs(k)) / 1000.0,
                                 41.2, 0.3);
@@ -177,9 +192,10 @@ TEST(UiSmoke, IconTabsAndTheme) {
 TEST(UiSmoke, TrainingSessionWithFakeBackend) {
     FakeFactory ff;
     ff.notes = 16;
-    // Slow enough that Parar lands well before the 2nd unplayed slot is finalised as a Miss
-    // (1.3 s of virtual time after the last note = 650 ms of wall time).
-    ff.speed = 2;
+    // The fake clock freezes 0.6 s after the last note: its slot (window 0.25 s + 0.1 s) is
+    // final, the next, unplayed slot (0.5 s later + 0.35 s) is not. Parar can come at any
+    // wall time after that: the result is deterministic.
+    ff.pauseAfterLastSec = 0.6;
     MainWindow w(ff.make(), fakeDevices);
     w.resize(1180, 760);
     w.show();
@@ -202,17 +218,19 @@ TEST(UiSmoke, TrainingSessionWithFakeBackend) {
     ASSERT_TRUE(pumpUntil([&] { return v->timeline()->noteCount() >= 8; }));
     w.grab().save(UI_SMOKE_RUNNING_PNG);  // mid-session look (pulse, live timeline)
     ASSERT_TRUE(pumpUntil([&] { return v->timeline()->noteCount() >= 16; })) << v->timeline()->noteCount();
+    ASSERT_TRUE(pumpUntil([&] { return ff.last->nowSec() >= ff.pauseAt; }));
+    QThread::msleep(100);  // let the scoring thread catch up with the frozen clock
     v->startButton()->click();  // Parar
     ASSERT_TRUE(waitRunning(w, false));
     EXPECT_FALSE(v->startButton()->property("running").toBool());
 
     EXPECT_EQ(v->timeline()->noteCount(), 16);
     EXPECT_GT(v->summaryCard()->shown().total, 90.0);
-    // The last hit is only final (and in the summary) once its window has passed: 15 or 16.
-    EXPECT_GE(v->summaryCard()->shown().hits, 15);
-    EXPECT_LE(v->summaryCard()->shown().slots - v->summaryCard()->shown().hits, 1);
+    EXPECT_EQ(v->summaryCard()->shown().hits, 16);
+    EXPECT_EQ(v->summaryCard()->shown().slots, 16);
+    EXPECT_EQ(v->timeline()->missCount(), 0);
     bool ok = false;
-    const double shownTotal = v->summaryCard()->totalText().toDouble(&ok);
+    const double shownTotal = QLocale().toDouble(v->summaryCard()->totalText(), &ok);
     EXPECT_TRUE(ok) << v->summaryCard()->totalText().toStdString();
     EXPECT_GT(shownTotal, 90.0);
     // The pulse flashed through the count-in and the scored beats.
@@ -373,6 +391,223 @@ TEST(UiSmoke, CloseDuringSessionIsClean) {
     w.reset();  // stops the session, joins its threads, then destroys the widgets
     QCoreApplication::processEvents();
     SUCCEED();
+}
+
+// The engine badge must show every state text in full (QSS letter-spacing included), also
+// after state changes (text + repolish), which is where "MOTOR PARADO" was clipped.
+TEST(UiSmoke, EngineBadgeFitsEveryState) {
+    FakeFactory ff;
+    MainWindow w(ff.make(), fakeDevices);
+    w.resize(1180, 760);
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    QLabel* b = w.engineBadge();
+    const QStringList texts = MainWindow::engineBadgeTexts();
+    ASSERT_GE(texts.size(), 4);
+    auto settle = [] {
+        for (int i = 0; i < 5; ++i) QCoreApplication::processEvents();
+    };
+    auto check = [&](const char* when) {
+        settle();
+        EXPECT_TRUE(texts.contains(b->text())) << b->text().toStdString();
+        const QFontMetrics fm(b->font());  // advance includes the font's letter spacing
+        const int frame = b->width() - b->contentsRect().width();
+        for (const QString& t : texts) {
+            const int needed = fm.horizontalAdvance(t) + frame;
+            EXPECT_GE(b->width(), needed) << when << ": " << t.toStdString();
+            EXPECT_GE(b->contentsRect().width(), fm.horizontalAdvance(t)) << when << ": " << t.toStdString();
+        }
+        EXPECT_GT(b->font().letterSpacing(), 0.0) << when;
+    };
+    check("idle");
+    EXPECT_EQ(b->text(), QString("MOTOR PARADO"));
+    w.tempoView()->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, true));
+    check("running");
+    w.tempoView()->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, false));
+    EXPECT_EQ(b->text(), QString("MOTOR PARADO"));
+    check("after stop");
+    const QImage img = b->grab().toImage();
+    EXPECT_FALSE(img.isNull());
+}
+
+// While the first device scan runs, Iniciar is disabled and no misleading error is shown.
+TEST(UiSmoke, StartWaitsForDeviceScan) {
+    std::atomic<bool> release{false};
+    FakeFactory ff;
+    MainWindow w(ff.make(), [&] {
+        while (!release.load()) QThread::msleep(1);
+        return fakeDevices();
+    });
+    w.show();
+    QCoreApplication::processEvents();
+    TempoTrainingView* v = w.tempoView();
+    EXPECT_FALSE(w.devicesReady());
+    EXPECT_FALSE(v->startButton()->isEnabled());
+    EXPECT_EQ(w.inputCombo()->placeholderText(), QString::fromUtf8("Procurando dispositivos…"));
+    v->startButton()->click();  // disabled: nothing happens
+    QCoreApplication::processEvents();
+    EXPECT_TRUE(w.errorBanner()->isHidden());
+    EXPECT_EQ(ff.calls, 0);
+    release = true;
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    EXPECT_TRUE(v->startButton()->isEnabled());
+    v->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, true));
+    v->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, false));
+}
+
+// ↻ stays disabled during a session, even when a scan result arrives meanwhile.
+TEST(UiSmoke, RefreshLockedWhileRunning) {
+    FakeFactory ff;
+    MainWindow w(ff.make(), fakeDevices);
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    EXPECT_TRUE(w.refreshButton()->isEnabled());
+    w.tempoView()->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, true));
+    EXPECT_FALSE(w.refreshButton()->isEnabled());
+    EXPECT_FALSE(w.inputCombo()->isEnabled());
+    w.refreshDevices();  // ignored while running
+    for (int i = 0; i < 20; ++i) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(2);
+    }
+    EXPECT_FALSE(w.refreshButton()->isEnabled());
+    EXPECT_FALSE(w.inputCombo()->isEnabled());
+    w.tempoView()->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, false));
+    EXPECT_TRUE(w.refreshButton()->isEnabled());
+    EXPECT_TRUE(w.inputCombo()->isEnabled());
+}
+
+// Only a device failure turns the badge into FALHA; a WAV write error does not.
+TEST(UiSmoke, BadgeFailedOnlyOnDeviceFailure) {
+    FakeFactory ff;
+    MainWindow w(ff.make(), fakeDevices);
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    TempoTrainingView* v = w.tempoView();
+    v->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, true));
+    EXPECT_EQ(w.engineBadge()->text(), QString("MOTOR ATIVO"));
+    UiEvent wav;
+    wav.type = UiEvent::Error;
+    wav.text = "Não foi possível gravar a amostra.";
+    w.dispatchEvents({wav});
+    EXPECT_FALSE(w.errorBanner()->isHidden());
+    EXPECT_EQ(w.engineBadge()->text(), QString("MOTOR ATIVO"));
+    v->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, false));
+    EXPECT_EQ(w.engineBadge()->text(), QString("MOTOR PARADO"));
+    w.dispatchEvents({wav});  // late writer error after Stopped
+    EXPECT_EQ(w.engineBadge()->text(), QString("MOTOR PARADO"));
+
+    // A real device failure does.
+    v->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, true));
+    FakeBackend* f = ff.last;
+    const double t0 = f->nowSec();
+    ASSERT_TRUE(pumpUntil([&] { return f->nowSec() > t0 + 0.5; }));
+    f->simulateFailure();
+    ASSERT_TRUE(waitRunning(w, false));
+    EXPECT_EQ(w.engineBadge()->text(), QString("FALHA"));
+}
+
+// The recording indicator reports what actually happened.
+TEST(UiSmoke, RecordingOutcomeShown) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    FakeFactory ff;
+    MainWindow w(ff.make(), fakeDevices);
+    w.setSampleDir(dir.path());
+    w.setSampleSeconds(0.5);
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    TempoTrainingView* v = w.tempoView();
+    QLabel* rec = v->recordingLabel();
+
+    // 1. Completed while running, no error: saved, and the file exists.
+    v->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, true));
+    ASSERT_TRUE(v->recordButton()->isEnabled());
+    v->recordButton()->click();
+    EXPECT_TRUE(rec->text().startsWith(QString::fromUtf8("● Gravando")));
+    ASSERT_TRUE(pumpUntil([&] { return rec->text().startsWith("Amostra salva"); })) << rec->text().toStdString();
+    const QStringList wavs = QDir(dir.path()).entryList({"*.wav"}, QDir::Files);
+    ASSERT_EQ(wavs.size(), 1);
+    EXPECT_TRUE(rec->text().contains(wavs.front()));
+    EXPECT_GT(QFileInfo(dir.filePath(wavs.front())).size(), 44);
+
+    // 2. Stopped before the end: interrupted.
+    w.setSampleSeconds(30);
+    ASSERT_TRUE(pumpUntil([&] { return v->recordButton()->isEnabled(); }));
+    v->recordButton()->click();
+    v->startButton()->click();  // Parar
+    ASSERT_TRUE(waitRunning(w, false));
+    EXPECT_EQ(rec->text(), QString::fromUtf8("Gravação interrompida"));
+
+    // 3. Next Start clears it; a write error is reported as a failure, never as saved.
+    v->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, true));
+    EXPECT_TRUE(rec->isHidden() || rec->text().isEmpty());
+    w.setSampleSeconds(0.5);
+    v->recordButton()->click();
+    UiEvent err;
+    err.type = UiEvent::Error;
+    err.text = "Não foi possível gravar a amostra.";
+    w.dispatchEvents({err});
+    for (int i = 0; i < 50; ++i) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(2);
+    }
+    ASSERT_TRUE(pumpUntil([&] { return !rec->text().startsWith(QString::fromUtf8("● Gravando")); }));
+    EXPECT_EQ(rec->text(), QString::fromUtf8("Falha ao gravar a amostra"));
+    v->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, false));
+    EXPECT_EQ(rec->text(), QString::fromUtf8("Falha ao gravar a amostra"));
+}
+
+// Long device descriptions: full text (and node name) in the item tooltip, wide popup.
+TEST(UiSmoke, DeviceCombosReadable) {
+    DeviceLists d;
+    d.inputs = {{"alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-mono",
+                 "PCM2902 Audio Codec Monofônico analógico"}};
+    d.outputs = {{"alsa_output.pci-0000_01_00.1.hdmi-stereo-extra1",
+                  "TU102 High Definition Audio Controller Digital Stereo (HDMI 2)"}};
+    FakeFactory ff;
+    MainWindow w(ff.make(), [d] { return d; });
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    for (QComboBox* c : {w.inputCombo(), w.outputCombo()}) {
+        const AudioDevice& dev = c == w.inputCombo() ? d.inputs[0] : d.outputs[0];
+        const QString tip = c->itemData(0, Qt::ToolTipRole).toString();
+        EXPECT_TRUE(tip.contains(QString::fromStdString(dev.description))) << tip.toStdString();
+        EXPECT_TRUE(tip.contains(QString::fromStdString(dev.name))) << tip.toStdString();
+        EXPECT_EQ(c->toolTip(), tip);
+        const int textW = c->view()->fontMetrics().horizontalAdvance(QString::fromStdString(dev.description));
+        EXPECT_GE(c->view()->minimumWidth(), textW) << dev.description;
+    }
+}
+
+// Decimal separators follow QLocale (like the spin boxes).
+TEST(UiSmoke, NumbersFollowLocale) {
+    const QLocale saved;
+    QLocale::setDefault(QLocale(QLocale::Portuguese, QLocale::Brazil));
+    {
+        ScoreSummaryCard card;
+        card.setSummary(GridScorer::Summary{97.5, 96.25, 16, 16, 1, 8.5, 2.25});
+        EXPECT_EQ(card.totalText(), QString("97,5"));
+        LevelMeter m;
+        m.setPeak(0.25);  // -12.04 dBFS
+        EXPECT_EQ(m.readoutText(), QString("-12,0 dB"));
+    }
+    QLocale::setDefault(QLocale::c());
+    {
+        ScoreSummaryCard card;
+        card.setSummary(GridScorer::Summary{97.5, 96.25, 16, 16, 1, 8.5, 2.25});
+        EXPECT_EQ(card.totalText(), QString("97.5"));
+    }
+    QLocale::setDefault(saved);
 }
 
 #if defined(__SANITIZE_THREAD__)

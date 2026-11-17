@@ -122,6 +122,11 @@ void FakeBackend::run() {
     while (!stopReq_.load(std::memory_order_acquire)) {
         std::this_thread::sleep_until(base + std::chrono::duration_cast<clock::duration>(blockWall * double(paced + 1)));
         ++paced;
+        if (now_.load(std::memory_order_acquire) >= o_.pauseAtSec) {
+            base = clock::now();  // frozen: idle at block cadence, no data, no clock advance
+            paced = 0;
+            continue;
+        }
         if (failed_.load(std::memory_order_acquire)) {
             // The device is gone: no more data, but the clock keeps running.
             ++k;

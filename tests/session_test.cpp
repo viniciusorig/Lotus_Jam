@@ -695,6 +695,21 @@ TEST(Session, StopDiscardsPendingRecording) {
 
 // ---------------------------------------------------------------- fix round 2: many gaps
 
+TEST(FakeBackend, PausesAtVirtualTime) {
+    FakeBackend::Options o;
+    o.speed = 20;
+    o.pauseAtSec = o.startSec + 0.5;
+    FakeBackend f(o);
+    std::string err;
+    ASSERT_TRUE(f.start(err)) << err;
+    ASSERT_TRUE(waitUntil([&] { return f.nowSec() >= o.pauseAtSec; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));  // 2 s of virtual time at speed 20
+    EXPECT_NEAR(f.nowSec(), o.pauseAtSec, 1e-9);
+    // No more input after the pause point: exactly 0.5 s worth of frames was produced.
+    EXPECT_EQ(f.input().readable(), size_t(0.5 * FakeBackend::kSampleRate));
+    f.stop();
+}
+
 TEST(FakeBackend, SeveralDropWindows) {
     FakeBackend::Options o;
     o.speed = 50;

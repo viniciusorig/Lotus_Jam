@@ -33,7 +33,6 @@ TimelineWidget::TimelineWidget(QWidget* parent) : QWidget(parent) {
     linePen_ = QPen(alpha(theme::nana_pink, 0.55), 1.5);
     missPen_ = QPen(theme::zone_miss, 2.2, Qt::SolidLine, Qt::RoundCap);
     labelPen_ = QPen(theme::text_muted);
-    framePen_ = QPen(theme::border_subtle, 1);
     labelFont_ = theme::monoFont(10);
     setAttribute(Qt::WA_OpaquePaintEvent);
 }

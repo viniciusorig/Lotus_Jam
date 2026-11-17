@@ -114,9 +114,5 @@ void PulseWidget::paintEvent(QPaintEvent*) {
             p.setPen(countPen_);
             p.drawText(QRectF(0, circle.bottom() + 2, width(), 22), Qt::AlignCenter, "BATIDA");
         }
-    } else {
-        p.setFont(smallFont_);
-        p.setPen(countPen_);
-        p.drawText(QRectF(0, circle.bottom() + 2, width(), 22), Qt::AlignCenter, "PULSO");
-    }
+    }  // idle: just the disc (the card title already says "PULSO")
 }

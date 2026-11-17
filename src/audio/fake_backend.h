@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -41,6 +42,9 @@ public:
         bool backpressure = false;
         size_t inputCapacity = size_t(1) << 17;  // samples (~2.7 s), power of two
         size_t captureOutputFrames = 0;  // stereo frames of output kept for capturedOutput()
+        // Once nowSec() reaches this time the driver produces nothing more and the virtual
+        // clock stays frozen until stop() (deterministic end point for UI tests).
+        double pauseAtSec = std::numeric_limits<double>::infinity();
     };
 
     static constexpr size_t kBlock = 480;

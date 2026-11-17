@@ -93,6 +93,8 @@ TempoTrainingView::TempoTrainingView(QWidget* parent) : QWidget(parent) {
     start_->setProperty("running", false);
     start_->setMinimumWidth(132);
     start_->setCursor(Qt::PointingHandCursor);
+    start_->setEnabled(false);
+    start_->setToolTip(QString::fromUtf8("Procurando dispositivos…"));
     ch->addWidget(start_, 0, Qt::AlignBottom);
     root->addWidget(controls);
 
@@ -127,14 +129,6 @@ TempoTrainingView::TempoTrainingView(QWidget* parent) : QWidget(parent) {
             Q_EMIT startRequested();
     });
     connect(record_, &QPushButton::clicked, this, &TempoTrainingView::recordRequested);
-
-    recTimer_.setSingleShot(true);
-    connect(&recTimer_, &QTimer::timeout, this, [this] {
-        recLabel_->setProperty("state", "done");
-        recLabel_->setText(QString::fromUtf8("Amostra salva: %1").arg(QFileInfo(recPath_).fileName()));
-        restyle(recLabel_);
-        if (running_) record_->setEnabled(true);
-    });
 }
 
 int TempoTrainingView::bpm() const { return bpm_->value(); }
@@ -149,11 +143,11 @@ void TempoTrainingView::restyle(QWidget* w) {
 
 void TempoTrainingView::setRunning(bool running) {
     running_ = running;
-    start_->setEnabled(true);
+    start_->setEnabled(running || startAllowed_);
     start_->setText(running ? "Parar" : "Iniciar");
     start_->setProperty("running", running);
     restyle(start_);
-    record_->setEnabled(running && !recTimer_.isActive());
+    record_->setEnabled(running && rec_ != Rec::Recording);
     bpm_->setEnabled(!running);
     countIn_->setEnabled(!running);
     subdivision_->setEnabled(!running);
@@ -168,13 +162,41 @@ void TempoTrainingView::setStarting(bool starting) {
     subdivision_->setEnabled(false);
 }
 
-void TempoTrainingView::showRecording(const QString& path, double seconds) {
-    recPath_ = path;
-    recLabel_->setProperty("state", "recording");
-    recLabel_->setText(QString::fromUtf8("● Gravando amostra…"));
-    recLabel_->setToolTip(path);
-    recLabel_->show();
-    restyle(recLabel_);
-    record_->setEnabled(false);
-    recTimer_.start(int(seconds * 1000.0));
+void TempoTrainingView::setStartAllowed(bool allowed) {
+    startAllowed_ = allowed;
+    start_->setToolTip(allowed ? QString() : QString::fromUtf8("Procurando dispositivos…"));
+    if (start_->text() != QString::fromUtf8("Iniciando…")) start_->setEnabled(running_ || startAllowed_);
+}
+
+void TempoTrainingView::setRecordingState(Rec state, const QString& path) {
+    rec_ = state;
+    const QString file = QFileInfo(path).fileName();
+    switch (state) {
+    case Rec::None:
+        recLabel_->clear();
+        recLabel_->hide();
+        break;
+    case Rec::Recording:
+        recLabel_->setProperty("state", "recording");
+        recLabel_->setText(QString::fromUtf8("● Gravando amostra…"));
+        break;
+    case Rec::Saved:
+        recLabel_->setProperty("state", "done");
+        recLabel_->setText(QString::fromUtf8("Amostra salva: %1").arg(file));
+        break;
+    case Rec::Interrupted:
+        recLabel_->setProperty("state", "done");
+        recLabel_->setText(QString::fromUtf8("Gravação interrompida"));
+        break;
+    case Rec::Failed:
+        recLabel_->setProperty("state", "recording");
+        recLabel_->setText(QString::fromUtf8("Falha ao gravar a amostra"));
+        break;
+    }
+    if (state != Rec::None) {
+        recLabel_->setToolTip(path);
+        recLabel_->show();
+        restyle(recLabel_);
+    }
+    record_->setEnabled(running_ && state != Rec::Recording);
 }

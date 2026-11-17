@@ -1,5 +1,6 @@
 #pragma once
 #include <QMainWindow>
+#include <QStringList>
 #include <QTimer>
 #include <functional>
 #include <memory>
@@ -59,6 +60,11 @@ public:
     QDoubleSpinBox* gainSpin() const { return gain_; }
     QDoubleSpinBox* compensationSpin() const { return comp_; }
     QLabel* engineBadge() const { return badge_; }
+    QPushButton* refreshButton() const { return refresh_; }
+    static QStringList engineBadgeTexts();
+    // Where "Gravar amostra" writes and how long it records (tests use a temp dir / short take).
+    void setSampleDir(const QString& dir) { sampleDir_ = dir; }
+    void setSampleSeconds(double s) { sampleSeconds_ = s; }
     bool devicesReady() const { return devicesReady_; }
 
     // Applies a batch of UiEvents to the widgets (called by the poll timer; public for tests).
@@ -115,4 +121,11 @@ private:
     QPushButton* refresh_ = nullptr;
     QDoubleSpinBox* gain_ = nullptr;
     QDoubleSpinBox* comp_ = nullptr;
+    QString sampleDir_;
+    double sampleSeconds_ = 10.0;
+    static constexpr double kRecGraceSec = 1.5;
+    bool userStop_ = false;  // the current session's end was asked for by Parar
+    bool recPending_ = false, recError_ = false;
+    double recDeadline_ = 0;  // backend clock
+    QString recPath_;
 };

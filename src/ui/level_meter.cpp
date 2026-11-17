@@ -1,5 +1,6 @@
 #include "ui/level_meter.h"
 
+#include <QLocale>
 #include <QPainter>
 #include <QResizeEvent>
 #include <algorithm>
@@ -49,6 +50,10 @@ void LevelMeter::setPeak(double peak) {
 void LevelMeter::reset() {
     db_ = holdDb_ = kMinDb;
     update();
+}
+
+QString LevelMeter::readoutText() const {
+    return db_ <= kMinDb + 0.01 ? QString::fromUtf8("−∞ dB") : QLocale().toString(db_, 'f', 1) + " dB";
 }
 
 double LevelMeter::xFor(double db, double w) const { return (db - kMinDb) / (kMaxDb - kMinDb) * w; }
@@ -107,6 +112,6 @@ void LevelMeter::paintEvent(QPaintEvent*) {
     // Numeric readout.
     p.setFont(valueFont_);
     p.setPen(db_ <= kMinDb + 0.01 ? tickPen_ : textPen_);
-    const QString v = db_ <= kMinDb + 0.01 ? QString::fromUtf8("−∞ dB") : QString::asprintf("%5.1f dB", db_);
+    const QString v = readoutText();
     p.drawText(QRectF(width() - kValueW, 0, kValueW, height()), Qt::AlignRight | Qt::AlignVCenter, v);
 }

@@ -2,6 +2,7 @@
 
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLocale>
 #include <QVBoxLayout>
 
 ScoreSummaryCard::ScoreSummaryCard(QWidget* parent) : QFrame(parent) {
@@ -43,16 +44,18 @@ QWidget* ScoreSummaryCard::tile(const QString& caption, const QString& unit, QLa
 }
 
 namespace {
-QString ms(double v) { return QString::asprintf("%+.1f", v); }
+// Numbers follow the default QLocale (decimal comma in pt-BR), like the spin boxes.
+QString num(double v) { return QLocale().toString(v, 'f', 1); }
+QString ms(double v) { return (v > 0.0 ? QString("+") : QString()) + num(v); }
 }  // namespace
 
 void ScoreSummaryCard::setSummary(const GridScorer::Summary& s) {
     shown_ = s;
     const bool any = s.slots > 0;
-    total_->setText(any ? QString::number(s.total, 'f', 1) : QString::fromUtf8("—"));
-    last_->setText(any ? QString::number(s.lastN, 'f', 1) : QString::fromUtf8("—"));
+    total_->setText(any ? num(s.total) : QString::fromUtf8("—"));
+    last_->setText(any ? num(s.lastN) : QString::fromUtf8("—"));
     mean_->setText(s.hits > 0 ? ms(s.meanErrMs) : QString::fromUtf8("—"));
-    std_->setText(s.hits > 0 ? QString::number(s.stdErrMs, 'f', 1) : QString::fromUtf8("—"));
+    std_->setText(s.hits > 0 ? num(s.stdErrMs) : QString::fromUtf8("—"));
     extras_->setText(QString::number(s.extras));
 }
 

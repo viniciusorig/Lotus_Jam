@@ -27,8 +27,13 @@ public:
     bool isRunning() const { return running_; }
     // Start in progress (backend connecting): the button is disabled and shows "Iniciando…".
     void setStarting(bool starting);
-    // Shows the recording indicator for `seconds`, then "Amostra salva: <file>".
-    void showRecording(const QString& path, double seconds);
+    // Iniciar stays disabled until the first device scan has finished.
+    void setStartAllowed(bool allowed);
+    // Recording indicator: "● Gravando amostra…", "Amostra salva: <file>",
+    // "Gravação interrompida", "Falha ao gravar a amostra", or hidden (None).
+    enum class Rec { None, Recording, Saved, Interrupted, Failed };
+    void setRecordingState(Rec state, const QString& path = {});
+    Rec recordingState() const { return rec_; }
 
     QPushButton* startButton() const { return start_; }
     QPushButton* recordButton() const { return record_; }
@@ -38,6 +43,7 @@ public:
     PulseWidget* pulse() const { return pulse_; }
     TimelineWidget* timeline() const { return timeline_; }
     ScoreSummaryCard* summaryCard() const { return card_; }
+    QLabel* recordingLabel() const { return recLabel_; }
 
 Q_SIGNALS:
     void startRequested();
@@ -54,8 +60,8 @@ private:
     QPushButton* start_ = nullptr;
     QPushButton* record_ = nullptr;
     QLabel* recLabel_ = nullptr;
-    QTimer recTimer_;
-    QString recPath_;
+    bool startAllowed_ = false;
+    Rec rec_ = Rec::None;
     PulseWidget* pulse_ = nullptr;
     TimelineWidget* timeline_ = nullptr;
     ScoreSummaryCard* card_ = nullptr;

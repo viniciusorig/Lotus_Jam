@@ -21,6 +21,7 @@ public:
     void setPeak(double peak);  // linear 0..1
     void reset();
     double levelDb() const { return db_; }
+    QString readoutText() const;  // the numeric readout, e.g. "-12,3 dB" (QLocale)
     static double toDb(double peak);
 
     QSize sizeHint() const override { return {220, 34}; }

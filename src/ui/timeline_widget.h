@@ -46,6 +46,6 @@ private:
 
     QBrush bg_, bandExact_, bandWarn_, bandMiss_;
     QBrush dotExact_, dotWarn_, dotMiss_, haloExact_, haloWarn_, haloMiss_;
-    QPen axisPen_, gridPen_, linePen_, missPen_, labelPen_, framePen_;
+    QPen axisPen_, gridPen_, linePen_, missPen_, labelPen_;
     QFont labelFont_;
 };
