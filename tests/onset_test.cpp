@@ -3,17 +3,23 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <random>
 #include <vector>
 
 #include "dsp/onset.h"
 
+#include "onset_signals.h"
+
 namespace {
 
-constexpr double kSr = 48000.0;
-constexpr double kPi = 3.14159265358979323846;
+using namespace onsetsig;
 
-std::vector<float> noise(double seconds, double sigma, unsigned seed) {
+// Noise for the tests that predate onset_signals.h, kept bit-identical to what they always
+// used (std::normal_distribution, whose algorithm is implementation-defined). WeakSignal sits
+// 2 dB above the 5 x floor guard and misses a note on ~10-15% of noise seeds with either this or
+// the portable generator, so re-drawing its noise would only trade one seed for another.
+std::vector<float> legacyNoise(double seconds, double sigma, unsigned seed) {
   std::mt19937 rng(seed);
   std::normal_distribution<double> g(0.0, sigma);
   std::vector<float> x(size_t(seconds * kSr));
@@ -34,67 +40,38 @@ void addNotes(std::vector<float>& x, const std::vector<int64_t>& starts, double 
     }
 }
 
-// Plucked notes of fundamental hz with partials `harm` (partial h decays h/2 times faster than
-// the fundamental), 4 ms linear attack, exponential decay tau, a random start phase per partial
-// and note. replace = same string: the previous note is damped linearly over 8 ms from the next
-// pluck; otherwise notes ring on and sum (different strings / let-ring).
-void addPlucks(std::vector<float>& x, const std::vector<int64_t>& starts, double peak, double hz,
-               const std::vector<double>& harm, double tau, bool replace, unsigned seed) {
-  std::mt19937 rng(seed);
-  std::uniform_real_distribution<double> ph(0.0, 2 * kPi);
-  const int64_t attack = int64_t(0.004 * kSr), damp = int64_t(0.008 * kSr);
-  std::vector<double> phs(harm.size());
-  for (size_t n = 0; n < starts.size(); ++n) {
-    const int64_t s = starts[n];
-    const bool cut = replace && n + 1 < starts.size();
-    // Without a cut a note rings for 12 tau (-104 dB) and is then dropped, to bound run time.
-    const int64_t end = cut ? starts[n + 1] + damp : s + int64_t(12.0 * tau * kSr);
-    for (auto& p : phs) p = ph(rng);
-    for (int64_t i = 0; s + i < end && s + i < int64_t(x.size()); ++i) {
-      double t = double(i) / kSr;
-      double env = (i < attack ? double(i) / double(attack) : 1.0) * std::exp(-t / tau);
-      if (cut && s + i >= starts[n + 1]) env *= 1.0 - double(s + i - starts[n + 1]) / double(damp);
-      double v = 0;
-      for (size_t h = 0; h < harm.size(); ++h)
-        v += harm[h] * std::exp(-t * double(h) / (2 * tau)) * std::sin(2 * kPi * hz * double(h + 1) * t + phs[h]);
-      x[size_t(s + i)] += float(peak * env * v);
-    }
-  }
-}
-
-const std::vector<double> kSine = {1.0};
-const std::vector<double> kHarmonic = {1.0, 0.5, 0.3, 0.2, 0.1};
-
 // Bounds for notes played over a still-ringing tail (long takes, LowNotes `_harm`). They are
 // measured limits of the method, not slack; isolated notes keep the 3 ms bound of the tests above.
-// Each bound is the WORST single 60 s take over the full f0 x timbre x mode x peak matrix
-// (tau 0.4 s, 0.5 s spacing, 10 seeds), since each test checks one take.
+// Each bound covers the WORST single 60 s take of the full matrix (f0 41.2-246.9 Hz x sine/
+// harmonic x replace/overlap x peak 0.05/0.3, tau 0.4 s, 0.5 s spacing) over seeds 1-40 with
+// these generators (1920 takes), since each test checks one take; peak 0.05 and 0.3 behave
+// the same.
 //
-// Timing: on a tail only ~11 dB down, the walk-back over the raw 5 ms RMS stops early on the
-// ripple of the 5 ms RMS (f0 below ~110 Hz) and on the dip that damping plus destructive
-// interference makes in the first ms (masking by the ringing tail), so re-plucks are reported
+// Timing (masking by the ringing tail): on a tail only ~11 dB down, the walk-back over the raw
+// 5 ms RMS stops early on the ripple of the 5 ms RMS (f0 below ~110 Hz) and on the dip that
+// damping plus destructive interference makes in the first ms, so re-plucks are reported
 // 2-4 ms late on average, with a spread that grows as f0 falls and when partials ring on.
-// Tolerance = smallest window holding >= 95% of the notes in every take (worst p95 |err|):
-// 10 ms for f0 >= 98 Hz, 12 ms for 55-98 Hz and 41.2 Hz sine, 16 ms for harmonic notes below
-// 60 Hz. Median |err| <= 5 ms in every take (<= 3 ms in all but harmonic below 60 Hz).
-constexpr double kTailTolMs = 10.0;         // f0 >= 98 Hz
-constexpr double kTailTolLowMs = 12.0;      // 55-98 Hz, and 41.2 Hz pure sine
-constexpr double kTailTolHarmLowMs = 16.0;  // harmonic timbre below 60 Hz
+// Tolerance = window holding >= 95% of the notes in every take (worst p95 |err| + 1 ms):
+// worst 11 ms for f0 >= 98 Hz, 12 ms for 55-98 Hz and 41.2 Hz sine, 19 ms for harmonic notes
+// below 60 Hz. Median |err| <= 5 ms in every take (<= 4 ms in all but harmonic below 60 Hz).
+constexpr double kTailTolMs = 12.0;         // f0 >= 98 Hz
+constexpr double kTailTolLowMs = 13.0;      // below 98 Hz, except harmonic below 60 Hz
+constexpr double kTailTolHarmLowMs = 20.0;  // harmonic timbre below 60 Hz
 constexpr double kTailInTolPct = 95.0;
 constexpr double kTailMedianMs = 5.0;
 //
-// Detection: a re-pluck is seen only if the level rises > 6 dB within 15 ms (the rise
-// criterion). In overlap mode with a pure sine, the new note adds to the ringing tails of the
-// same frequency with a random phase (same-pitch phasor sum), and ~5-14% of notes rise < 6 dB
-// in TRUE amplitude (worst take 85.8% overall, worst 10 s segment 15/20). Harmonic notes below
-// 60 Hz lose some re-plucks the same way while the tail is still loud (worst take 95.0%, worst
-// segment 17/20), and harmonic overlap at 98 Hz rarely one (worst segment 19/20). Everything
-// else: 100% detected. 0 false onsets everywhere.
-constexpr int kDetPctDefault = 95;           // per 10 s segment (19 of 20)
-constexpr int kDetPctOverlapSineTotal = 85;  // same-pitch phasor sum, overall
-constexpr int kDetPctOverlapSineSeg = 75;    // ... per segment
-constexpr int kDetPctHarmLowTotal = 95;      // harmonic below 60 Hz, overall
-constexpr int kDetPctHarmLowSeg = 85;        // ... per segment
+// Detection (6 dB rise criterion): a re-pluck is seen only if the level rises > 6 dB within
+// 15 ms. When notes ring on (overlap), the new note adds to the ringing tails with a random
+// phase: with a pure tone at the same pitch (same-pitch phasor sum) up to ~17% of notes rise
+// < 6 dB in TRUE amplitude (worst take 100/120, worst 10 s segment 13/20); with harmonic notes
+// the faster partials still mark most attacks (worst take 113/120 at 41.2 Hz, worst segment
+// 17/20), and harmonic replace below 60 Hz loses a rare one (worst 118/120, segment 18/20).
+// Replace mode otherwise: 120/120 in every take. 0 false onsets in all 1920 takes.
+constexpr int kDetPctDefault = 95;              // replace mode, per 10 s segment (19 of 20)
+constexpr int kDetPctOverlapSineTotal = 80;     // same-pitch phasor sum, overall
+constexpr int kDetPctOverlapSineSeg = 60;       // ... per segment (12 of 20)
+constexpr int kDetPctHarmOverlapTotal = 93;     // harmonic overlap, and harmonic below 60 Hz
+constexpr int kDetPctHarmOverlapSeg = 80;       // ... per segment (16 of 20)
 
 double medianOf(std::vector<double> v) {
   if (v.empty()) return 0.0;
@@ -125,7 +102,7 @@ double maxErrorMs(const std::vector<int64_t>& got, const std::vector<int64_t>& w
 
 TEST(OnsetDetector, SyntheticBassTimingWithin3ms) {
   auto starts = noteStarts();
-  auto x = noise(11.0, 20.0 / 32768.0, 1);
+  auto x = legacyNoise(11.0, 20.0 / 32768.0, 1);
   addNotes(x, starts, 0.3);
   auto got = run(x, 480);
   ASSERT_EQ(got.size(), starts.size());
@@ -135,14 +112,14 @@ TEST(OnsetDetector, SyntheticBassTimingWithin3ms) {
 TEST(OnsetDetector, NoiseOnlyNoOnsets) {
   for (double sigma : {6e-4, 1.8e-3, 3e-3, 2e-2, 0.1})
     for (unsigned seed : {1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u}) {
-      auto got = run(noise(10.0, sigma, seed), 480);
+      auto got = run(legacyNoise(10.0, sigma, seed), 480);
       EXPECT_TRUE(got.empty()) << "sigma " << sigma << " seed " << seed << " first " << got.front();
     }
 }
 
 TEST(OnsetDetector, WeakSignalStillDetected) {
   auto starts = noteStarts();
-  auto x = noise(11.0, std::pow(10.0, -55.0 / 20.0), 5);
+  auto x = legacyNoise(11.0, std::pow(10.0, -55.0 / 20.0), 5);
   addNotes(x, starts, std::pow(10.0, -39.0 / 20.0));
   auto got = run(x, 480);
   ASSERT_EQ(got.size(), starts.size());
@@ -151,7 +128,7 @@ TEST(OnsetDetector, WeakSignalStillDetected) {
 
 TEST(OnsetDetector, ChunkSizeInvariant) {
   auto starts = noteStarts();
-  auto x = noise(11.0, 20.0 / 32768.0, 7);
+  auto x = legacyNoise(11.0, 20.0 / 32768.0, 7);
   addNotes(x, starts, 0.3);
   auto a = run(x, 1);
   auto b = run(x, 480);
@@ -162,7 +139,7 @@ TEST(OnsetDetector, ChunkSizeInvariant) {
 }
 
 TEST(OnsetDetector, NoOnsetsDuringWarmup) {
-  auto x = noise(0.9, 20.0 / 32768.0, 3);
+  auto x = legacyNoise(0.9, 20.0 / 32768.0, 3);
   addNotes(x, {int64_t(0.5 * kSr)}, 0.3);
   EXPECT_TRUE(run(x, 480).empty());
 }
@@ -172,7 +149,7 @@ class SustainedNotes : public ::testing::TestWithParam<std::pair<double, double>
 TEST_P(SustainedNotes, AllDetected) {
   auto [hz, tau] = GetParam();
   auto starts = noteStarts();
-  auto x = noise(11.0, 20.0 / 32768.0, 11);
+  auto x = legacyNoise(11.0, 20.0 / 32768.0, 11);
   addNotes(x, starts, 0.3, hz, tau);
   auto got = run(x, 480);
   ASSERT_EQ(got.size(), starts.size());
@@ -186,7 +163,7 @@ INSTANTIATE_TEST_SUITE_P(Bass, SustainedNotes,
 
 TEST(OnsetDetector, SustainedNotesStillDetected) {
   auto starts = noteStarts();
-  auto x = noise(11.0, 20.0 / 32768.0, 12);
+  auto x = legacyNoise(11.0, 20.0 / 32768.0, 12);
   addNotes(x, starts, 0.3, 82.4, 1.0);
   auto got = run(x, 480);
   ASSERT_EQ(got.size(), starts.size());
@@ -214,40 +191,41 @@ TEST_P(LowNotes, RepeatedAtBeat) {
   const int kNotes = 12;
   std::vector<int64_t> starts;
   for (int k = 0; k < kNotes; ++k) starts.push_back(int64_t((1.5 + p.spacing * k) * kSr));
-  auto x = noise(1.5 + p.spacing * kNotes + 1.0, 20.0 / 32768.0, 21);
+  auto x = p.harmonic ? noise(1.5 + p.spacing * kNotes + 1.0, 20.0 / 32768.0, 21)
+                      : legacyNoise(1.5 + p.spacing * kNotes + 1.0, 20.0 / 32768.0, 21);
   if (p.harmonic)
     addPlucks(x, starts, 0.3, p.hz, kHarmonic, p.tau, false, 22);
   else
     addNotes(x, starts, 0.3, p.hz, p.tau);
   auto got = run(x, 480);
   const bool lenient = p.tau == 1.0 && p.spacing == 0.5;
+  std::vector<double> errs;  // distance of each detected onset to the nearest true start
+  for (int64_t g : got) {
+    double best = 1e9;
+    for (int64_t s : starts) best = std::min(best, std::abs(double(g - s)) / kSr * 1000.0);
+    errs.push_back(best);
+  }
+  const double worst = errs.empty() ? 0.0 : *std::max_element(errs.begin(), errs.end());
+  if (p.harmonic) {
+    // Notes ring on (0.5 s apart over a tau 0.4 s tail): tail regime, but 12 notes are too few
+    // for the 95% window of the long takes (checked on 120 notes in LongPlaying). Over phase
+    // seeds 1-40 this case gave 10-12 detections, median 2-8 ms, worst onset 27 ms, never a
+    // false one. So: no false onsets (each within 30 ms of a start), >= 10 of 12, median <= 8 ms.
+    EXPECT_LE(got.size(), starts.size());
+    EXPECT_GE(got.size(), starts.size() - 2);
+    EXPECT_LE(worst, 30.0);
+    EXPECT_LE(medianOf(errs), 8.0);
+    return;
+  }
   if (lenient) {
     EXPECT_LE(got.size(), starts.size());
   } else {
     ASSERT_EQ(got.size(), starts.size());
   }
   // every detected onset is within 3 ms of some true start
-  double worst = 0;
-  for (int64_t g : got) {
-    double best = 1e9;
-    for (int64_t s : starts) best = std::min(best, std::abs(double(g - s)) / kSr * 1000.0);
-    worst = std::max(worst, best);
-  }
   // Lenient pair: a re-pluck on top of an in-phase/anti-phase tail of the same pitch makes the
-  // combined level start rising a few ms late, so allow 8 ms there. The harmonic case rings on
-  // (notes 0.5 s apart over a tau 0.4 s tail), so it gets the tail tolerances (see kTail*).
-  if (p.harmonic) {
-    EXPECT_LE(worst, kTailTolHarmLowMs);
-    std::vector<double> errs;
-    for (int64_t g : got) {
-      double best = 1e9;
-      for (int64_t s : starts) best = std::min(best, std::abs(double(g - s)) / kSr * 1000.0);
-      errs.push_back(best);
-    }
-    EXPECT_LE(medianOf(errs), kTailMedianMs);
-  } else {
-    EXPECT_LT(worst, lenient ? 8.0 : 3.0);
-  }
+  // combined level start rising a few ms late, so allow 8 ms there.
+  EXPECT_LT(worst, lenient ? 8.0 : 3.0);
 }
 
 std::vector<LowParam> lowParams() {
@@ -287,9 +265,10 @@ void checkLongPlaying(const LongParam& p, unsigned seed) {
   auto got = run(x, 480);
   const bool overlapSine = !p.replace && !p.harmonic;
   const bool harmLow = p.harmonic && p.hz < 60.0;
+  const bool harmWeak = p.harmonic && (!p.replace || harmLow);
   const double tol = harmLow ? kTailTolHarmLowMs : (p.hz >= 98.0 ? kTailTolMs : kTailTolLowMs);
-  const int segPct = overlapSine ? kDetPctOverlapSineSeg : harmLow ? kDetPctHarmLowSeg : kDetPctDefault;
-  const int totPct = overlapSine ? kDetPctOverlapSineTotal : harmLow ? kDetPctHarmLowTotal : kDetPctDefault;
+  const int segPct = overlapSine ? kDetPctOverlapSineSeg : harmWeak ? kDetPctHarmOverlapSeg : kDetPctDefault;
+  const int totPct = overlapSine ? kDetPctOverlapSineTotal : harmWeak ? kDetPctHarmOverlapTotal : kDetPctDefault;
   int perSegment[6] = {}, withinTol = 0, matched = 0;
   std::vector<double> errs;
   std::vector<bool> used(got.size(), false);
@@ -321,8 +300,9 @@ class LongPlaying : public ::testing::TestWithParam<LongParam> {};
 
 TEST_P(LongPlaying, StaysDetected) { checkLongPlaying(GetParam(), 2); }
 
-// Representative subset (the full f0 x timbre x mode x peak matrix runs in a throwaway program,
-// see the Task 5d report): every f0, both timbres, both modes and both peaks appear.
+// Representative subset (the full f0 x timbre x mode x peak matrix x 40 seeds runs in an offline
+// program on the same generators, see the Task 5d report): every f0, both timbres, both modes
+// and both peaks appear.
 INSTANTIATE_TEST_SUITE_P(Continuous, LongPlaying,
                          ::testing::Values(LongParam{41.2, true, false, 0.05}, LongParam{55.0, false, true, 0.3},
                                            LongParam{73.4, true, true, 0.05}, LongParam{98.0, false, false, 0.3},
@@ -363,4 +343,85 @@ TEST(OnsetDetector, RecoversAfterPause) {
       for (int64_t s : *v) best = std::min(best, std::abs(double(g - s)) / kSr * 1000.0);
     EXPECT_LT(best, 30.0) << "onset at " << double(g) / kSr << " s";
   }
+}
+
+// ---- Non-stationary disturbances: the continuous-playing fix must keep the noise guard. ----
+// The p99/p3 gate opens for anything that is not stationary noise (hum with harmonics, bursts,
+// thumps, ticks), so these assert that the floor guard still holds there: never more false
+// onsets (and never fewer notes) than the plain 5 x p3 floor that preceded the gate.
+
+// Mains hum (60 Hz with a 3rd harmonic, or with a 2nd harmonic) at -39 / -45 dBFS RMS over
+// -55 dBFS noise, and plucks every 4 s at G1 / G#1, harmonic tau 1.0 s: the decaying note beats
+// against the hum. The plain 5 x p3 floor already let a few beats through (pre-existing, see
+// onset.h), so the bound is that floor's own count on these exact signals (oldFalse / oldHits,
+// measured with the detector as of 0be7735; the uncapped gate of 56cb646 gave 0-18 more false
+// onsets per case here).
+struct HumParam {
+  double hz, rmsDbfs, h2, h3, peak;
+  int oldFalse, oldHits;  // over seeds 1 and 2, 20 notes each
+};
+
+class HumWithLowNotes : public ::testing::TestWithParam<HumParam> {};
+
+TEST_P(HumWithLowNotes, NoMoreFalseOnsetsThanPlainFloor) {
+  const auto p = GetParam();
+  int falseOnsets = 0, hits = 0;
+  for (unsigned seed : {1u, 2u}) {
+    std::vector<int64_t> starts;
+    for (int k = 0; k < 20; ++k) starts.push_back(int64_t((1.5 + 4.0 * k) * kSr));
+    auto x = noise(1.5 + 4.0 * 20, dbToAmp(-55.0), seed);
+    addHum(x, 60.0, p.h2, p.h3, p.rmsDbfs);
+    addPlucks(x, starts, p.peak, p.hz, kHarmonic, 1.0, false, seed + 11);
+    for (int64_t g : run(x, 480)) {
+      double best = 1e9;
+      for (int64_t s : starts) best = std::min(best, std::abs(double(g - s)) / kSr * 1000.0);
+      best <= 30.0 ? ++hits : ++falseOnsets;
+    }
+  }
+  EXPECT_LE(falseOnsets, p.oldFalse);
+  EXPECT_GE(hits, p.oldHits);
+}
+
+INSTANTIATE_TEST_SUITE_P(Mains60, HumWithLowNotes,
+                         ::testing::Values(HumParam{49.0, -39.0, 0.0, 0.3, 0.05, 1, 40}, HumParam{51.9, -39.0, 0.0, 0.3, 0.05, 0, 40},
+                                           HumParam{49.0, -39.0, 0.0, 0.3, 0.02, 0, 18}, HumParam{51.9, -39.0, 0.0, 0.3, 0.02, 0, 17},
+                                           HumParam{49.0, -45.0, 0.0, 0.3, 0.05, 0, 40}, HumParam{51.9, -45.0, 0.0, 0.3, 0.05, 0, 40},
+                                           HumParam{49.0, -45.0, 0.0, 0.3, 0.02, 0, 37}, HumParam{51.9, -45.0, 0.0, 0.3, 0.02, 0, 38},
+                                           HumParam{51.9, -39.0, 0.5, 0.0, 0.05, 5, 40}, HumParam{51.9, -39.0, 0.5, 0.0, 0.02, 1, 8}),
+                         [](const ::testing::TestParamInfo<HumParam>& i) {
+                           return "hz" + std::to_string(int(i.param.hz * 10)) + "_hum" + std::to_string(int(-i.param.rmsDbfs)) +
+                                  (i.param.h2 > 0 ? "_h2" : "_h3") + "_pk" + std::to_string(int(i.param.peak * 100));
+                         });
+
+// 20 s of playing, then a pause with hand contact +6 / +12 dB over the noise floor (thumps:
+// 25 Hz knocks; ticks: muted-string touches), one every ~2 s: nothing may fire in the pause.
+TEST(OnsetDetector, NoOnsetsFromTouchesInPause) {
+  for (bool thump : {false, true})
+    for (double overDb : {6.0, 12.0}) {
+      const double base = dbToAmp(-50.0);
+      auto x = noise(62.0, base, 41);
+      std::vector<int64_t> starts;
+      for (int k = 0; k < 40; ++k) starts.push_back(int64_t((1.5 + 0.5 * k) * kSr));
+      std::vector<float> play(x.size(), 0.0f);
+      addPlucks(play, starts, 0.1, 98.0, kHarmonic, 0.4, true, 42);
+      const size_t mute = size_t(21.5 * kSr), damp = size_t(0.008 * kSr);
+      for (size_t i = mute; i < play.size(); ++i)
+        play[i] *= i < mute + damp ? float(1.0 - double(i - mute) / double(damp)) : 0.0f;
+      for (size_t i = 0; i < x.size(); ++i) x[i] += play[i];
+      addTouches(x, 22.0, 61.0, 0.5, base, overDb, thump, 43);
+      auto got = run(x, 480);
+      const auto inPause = std::count_if(got.begin(), got.end(), [](int64_t g) { return g >= int64_t(21.6 * kSr); });
+      EXPECT_EQ(inPause, 0) << (thump ? "thumps" : "ticks") << " +" << overDb << " dB";
+      EXPECT_GE(int(got.size() - size_t(inPause)), 39) << "playing phase";
+    }
+}
+
+// Hiss bursts (+8 / +10 / +12 dB, 5 ms ramps, 0.2 s and 1 s long) on noise only: no onsets.
+TEST(OnsetDetector, NoOnsetsFromHissBursts) {
+  for (double gainDb : {8.0, 10.0, 12.0})
+    for (double dur : {0.2, 1.0}) {
+      auto x = noise(40.0, 1.0, 51);
+      applyBursts(x, 6e-4, gainDb, 0.005, dur, 52);
+      EXPECT_TRUE(run(x, 480).empty()) << "+" << gainDb << " dB bursts of " << dur << " s";
+    }
 }

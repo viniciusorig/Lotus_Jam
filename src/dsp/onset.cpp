@@ -11,7 +11,8 @@ constexpr size_t kEnvHistory = 10000;  // 10 s of 1 ms steps
 // lands in the gaps/quiet moments -- as long as there are gaps (see kGateRatio below).
 constexpr double kFloorPercentile = 0.03;
 // Power of two. Indexed back by up to kHold - 1 (peak-hold), kRiseSteps (rise), kHold (baseline
-// window) and kMaxWalkBack + 1 (walk-back) steps, so it needs >= kHold + 1 = 37 entries.
+// window) and kMaxWalkBack + 1 (walk-back) steps, so it needs more entries than the largest of
+// these (static_asserts below).
 constexpr size_t kDbHistory = 64;
 // Ripple suppression. A 5 ms RMS window is only ~20% of the period of a 41 Hz note (24 ms;
 // 30.9 Hz: 32 ms), so its output oscillates within each cycle and the rise criterion fired on
@@ -25,6 +26,8 @@ constexpr double kBaseDb = 1.0;
 constexpr int64_t kRecompute = 500;
 constexpr int64_t kRiseSteps = 15;
 constexpr int kMaxWalkBack = 20;
+static_assert(kDbHistory > size_t(kMaxWalkBack) + 1, "dB ring must hold the walk-back");
+static_assert(kDbHistory > size_t(kRiseSteps), "dB ring must hold the rise span");
 constexpr double kRiseDb = 6.0;
 constexpr float kStepDb = 0.2f;
 // Noise-floor multiplier (spec value; to be retuned later with the real bass).
@@ -34,17 +37,29 @@ constexpr double kPeakFrac = 0.12;
 // Floor-term gate (continuous playing). The floor term 5 x p3 assumes the 10 s window holds
 // some real silence. When the player never stops (e.g. 120 BPM, tau 0.4 s: the level falls only
 // ~11 dB between plucks), p3 converges to the INTER-NOTE level and 5 x p3 (+14 dB) ends above
-// the note peaks: detection collapsed ~11 s into the take. Measured p99(held)/p3(raw) over the
-// window: stationary noise 2.0-2.3 dB (sigma 6e-4..0.1), 50/60 Hz hum + noise at -39 dBFS
-// 3.7-5.3 dB, but >= 10.8 dB for every continuous tau = 0.4 take (41-247 Hz, sine/harmonic,
-// replace/overlap). So when p99 > kGateRatio x p3 the window holds signal that stationary noise
-// cannot produce, p3 may be a note tail rather than noise, and the floor term is capped at
-// kGateCap x p99 (it still applies in full when it is lower, e.g. weak notes over real silence,
-// where 5 x p3 is far below the notes). Below the gate (noise, hum) nothing changes: 5 x p3.
-// Capping only weakens a second guard: the 6 dB / 15 ms rise on the held envelope alone gave 0
-// false onsets in 2 h of noise and hum (sigma 6e-4..0.1, 50/60 Hz) with no floor term at all.
-constexpr double kGateRatio = 2.5;  // 8 dB
-constexpr double kGateCap = 0.25;   // -12 dB below the peak reference
+// the note peaks: detection collapsed ~11 s into the take.
+// The gate opens when p99(held) > kGateRatio x p3(raw), i.e. the window is not plain stationary
+// noise (2.0-2.3 dB for noise of any level). It is NOT evidence of playing: hum with a 2nd/3rd
+// harmonic (the 5 ms RMS ripples), noise bursts, thumps and ticks open it too, and so does every
+// continuous take (>= 10.8 dB). So the open gate only allows the floor term to be capped at
+// kGateCap x p99, and never below 5 x the remembered floor floorMem_:
+//   - floorMem_ = p3 while the gate is closed, and whenever p3 is no more than kFloorMemSnap
+//     (+6 dB) above it, so it follows the noise floor of hum, bursts, touches and beating
+//     exactly (there the threshold is the plain 5 x p3 again, as before the gate existed);
+//   - it is held when p3 jumps more than 6 dB above it with the gate open, which is what
+//     happens when the last real silence leaves the window during non-stop playing: p3 jumps
+//     from the noise to the inter-note level in one 0.5 s update.
+// The floor term while playing non-stop is therefore max(0.25 x p99, 5 x the noise floor seen
+// before the playing started), not 5 x the inter-note level. Without that lower bound only the
+// 6 dB / 15 ms rise test was left as a guard, and it does not stop non-stationary low-level
+// events (bursts, thumps, beating of a decaying note with hum).
+// Known limits: if the noise floor itself rises > 6 dB during non-stop playing, floorMem_ keeps
+// the older, lower value until the gate closes (a pause) or p3 comes back within 6 dB; if the
+// detector starts in the middle of non-stop playing (no silence ever seen), floorMem_ is the
+// inter-note level and the take collapses as before the gate existed.
+constexpr double kGateRatio = 2.5;     // 8 dB
+constexpr double kGateCap = 0.25;      // -12 dB below the peak reference
+constexpr double kFloorMemSnap = 2.0;  // +6 dB
 }  // namespace
 
 OnsetDetector::OnsetDetector(double sampleRate)
@@ -91,8 +106,11 @@ void OnsetDetector::updateThreshold() {
     double floorEnv = percentile(lin_.data(), n, kFloorPercentile);
     for (size_t i = 0; i < n; ++i) lin_[i] = env_[(start + i) % kEnvHistory];
     double peakEnv = percentile(lin_.data(), n, 0.99);
+    const bool gateOpen = peakEnv > kGateRatio * floorEnv;
+    if (floorMem_ < 0.0 || !gateOpen || floorEnv <= kFloorMemSnap * floorMem_) floorMem_ = floorEnv;
     double floorTerm = kFloorMult * floorEnv;
-    if (peakEnv > kGateRatio * floorEnv) floorTerm = std::min(floorTerm, kGateCap * peakEnv);
+    if (gateOpen)
+        floorTerm = std::min(floorTerm, std::max(kGateCap * peakEnv, kFloorMult * floorMem_));
     thr_ = std::max(floorTerm, kPeakFrac * peakEnv);
     haveThr_ = true;
 }
