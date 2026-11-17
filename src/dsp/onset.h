@@ -36,7 +36,7 @@ private:
     size_t untilStep_;  // samples until the next hop
 
     // History of envelope (long) and dB (short), indexed by absolute step number.
-    std::vector<float> env_, db_, lin_, scratch_;
+    std::vector<float> env_, rawHist_, db_, raw_, holdDb_, lin_, scratch_;
     int64_t steps_ = 0;  // number of steps produced so far
     int64_t lastOnset_ = -10000;
     double thr_ = 0.0;

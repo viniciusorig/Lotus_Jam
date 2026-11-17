@@ -113,8 +113,7 @@ struct PlayerRun {
 };
 
 // BPM 120, count-in 4, a synthetic player hits the first 16 scored beats at +offsetMs+jitter
-// on the bass open D string (73.4 Hz). Note: the OnsetDetector (Task 5) misfires on notes below
-// ~52 Hz repeated every 0.5 s (decaying tail ripple in its 5 ms RMS window); see task-8 report.
+// on the bass open E string (41.2 Hz).
 PlayerRun runSyntheticPlayer(double offsetMs, double compensationMs) {
     FakeBackend::Options o;
     o.speed = 20;
@@ -131,7 +130,7 @@ PlayerRun runSyntheticPlayer(double offsetMs, double compensationMs) {
     for (int k = 0; k < 16; ++k) {
         const double err = offsetMs + jitterMs(k);
         r.expectedErrMs.push_back(err);
-        f->scheduleNote(beatTime(cs, t0, cfg.countIn + k, o.outputLatencySec) + err / 1000.0, 73.4, 0.3);
+        f->scheduleNote(beatTime(cs, t0, cfg.countIn + k, o.outputLatencySec) + err / 1000.0, 41.2, 0.3);
     }
 
     std::string err;
