@@ -22,13 +22,14 @@ std::vector<float> noise(double seconds, double sigma, unsigned seed) {
 }
 
 // 55 Hz notes (4 ms linear attack, exponential decay) mixed into x at the given starts.
-void addNotes(std::vector<float>& x, const std::vector<int64_t>& starts, double peak) {
+void addNotes(std::vector<float>& x, const std::vector<int64_t>& starts, double peak,
+              double hz = 55.0, double tau = 0.25) {
   const size_t attack = size_t(0.004 * kSr);
   for (int64_t s : starts)
     for (size_t i = 0; s + int64_t(i) < int64_t(x.size()) && i < size_t(0.8 * kSr); ++i) {
       double t = double(i) / kSr;
-      double env = (i < attack ? double(i) / double(attack) : 1.0) * std::exp(-t / 0.25);
-      x[size_t(s) + i] += float(peak * env * std::sin(2 * kPi * 55.0 * t));
+      double env = (i < attack ? double(i) / double(attack) : 1.0) * std::exp(-t / tau);
+      x[size_t(s) + i] += float(peak * env * std::sin(2 * kPi * hz * t));
     }
 }
 
@@ -95,4 +96,30 @@ TEST(OnsetDetector, NoOnsetsDuringWarmup) {
   auto x = noise(0.9, 20.0 / 32768.0, 3);
   addNotes(x, {int64_t(0.5 * kSr)}, 0.3);
   EXPECT_TRUE(run(x, 480).empty());
+}
+
+class SustainedNotes : public ::testing::TestWithParam<std::pair<double, double>> {};
+
+TEST_P(SustainedNotes, AllDetected) {
+  auto [hz, tau] = GetParam();
+  auto starts = noteStarts();
+  auto x = noise(11.0, 20.0 / 32768.0, 11);
+  addNotes(x, starts, 0.3, hz, tau);
+  auto got = run(x, 480);
+  ASSERT_EQ(got.size(), starts.size());
+  EXPECT_LT(maxErrorMs(got, starts), 3.0);
+}
+
+INSTANTIATE_TEST_SUITE_P(Bass, SustainedNotes,
+                         ::testing::Values(std::pair{41.2, 0.25}, std::pair{41.2, 1.0},
+                                           std::pair{55.0, 0.25}, std::pair{55.0, 1.0},
+                                           std::pair{82.4, 0.25}, std::pair{82.4, 1.0}));
+
+TEST(OnsetDetector, SustainedNotesStillDetected) {
+  auto starts = noteStarts();
+  auto x = noise(11.0, 20.0 / 32768.0, 12);
+  addNotes(x, starts, 0.3, 82.4, 1.0);
+  auto got = run(x, 480);
+  ASSERT_EQ(got.size(), starts.size());
+  EXPECT_LT(maxErrorMs(got, starts), 3.0);
 }

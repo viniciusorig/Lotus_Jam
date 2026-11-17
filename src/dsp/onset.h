@@ -21,6 +21,7 @@ private:
     void updateThreshold();
     double percentile(const float* data, size_t n, double p);
 
+    // warmup_ and refractory_ are in steps of 1 ms regardless of sampleRate.
     size_t win_, hop_, warmup_ = 1000;
     int64_t refractory_ = 120;
 

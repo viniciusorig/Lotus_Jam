@@ -5,7 +5,10 @@
 
 namespace {
 constexpr size_t kEnvHistory = 10000;  // 10 s of 1 ms steps
-constexpr size_t kLowHistory = 5000;   // 5 s window for the noise-floor percentile
+// Noise floor = p3 of the last 10 s of envelope. p20 over 5 s tracked note-level energy when
+// notes sound >= ~80% of the time (sustained bass), pushing 5x floor above the note RMS and
+// losing onsets; a low percentile over a longer span still lands in the gaps/quiet moments.
+constexpr double kFloorPercentile = 0.03;
 constexpr size_t kDbHistory = 64;      // power of two; needs >= 16 (rise) and >= 21 (walk-back)
 constexpr int64_t kRecompute = 500;
 constexpr int64_t kRiseSteps = 15;
@@ -28,7 +31,11 @@ OnsetDetector::OnsetDetector(double sampleRate)
       db_(kDbHistory, 0.0f),
       lin_(kEnvHistory),
       scratch_(kEnvHistory) {
-    if (win_ < 1) win_ = 1, sq_.assign(1, 0.0), untilStep_ = 1;
+    if (win_ < 1) {
+        win_ = 1;
+        sq_.assign(1, 0.0);
+        untilStep_ = 1;
+    }
     if (hop_ < 1) hop_ = 1;
 }
 
@@ -50,8 +57,7 @@ void OnsetDetector::updateThreshold() {
     size_t n = size_t(std::min<int64_t>(steps_, int64_t(kEnvHistory)));
     size_t start = size_t(steps_) - n;
     for (size_t i = 0; i < n; ++i) lin_[i] = env_[(start + i) % kEnvHistory];
-    size_t nLow = std::min(n, kLowHistory);
-    double floorEnv = percentile(lin_.data() + (n - nLow), nLow, 0.20);
+    double floorEnv = percentile(lin_.data(), n, kFloorPercentile);
     double peakEnv = percentile(lin_.data(), n, 0.99);
     thr_ = std::max(kFloorMult * floorEnv, kPeakFrac * peakEnv);
     haveThr_ = true;
