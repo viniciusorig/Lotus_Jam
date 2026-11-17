@@ -1,8 +1,10 @@
 #pragma once
 // Synthetic test signals for the onset detector, shared by tests/onset_test.cpp and the offline
-// measurement programs (so a matrix run renders exactly what the tests render). Portable: all
-// randomness is derived from raw std::mt19937 output (whose sequence the standard fixes) with
-// explicit transforms, never from std::*_distribution (implementation-defined algorithms).
+// measurement programs (so a matrix run renders exactly what the tests render). All randomness
+// is derived from raw std::mt19937 output (whose sequence the standard fixes) with explicit
+// transforms, never from std::*_distribution (implementation-defined algorithms), so the signals
+// are the same across standard libraries up to last-bit differences of the libm functions
+// (log, cos, sin, exp), which can still move a decision that sits exactly at a threshold.
 
 #include <algorithm>
 #include <cmath>

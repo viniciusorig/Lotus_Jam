@@ -256,19 +256,38 @@ struct LongParam {
   double peak;
 };
 
-void checkLongPlaying(const LongParam& p, unsigned seed) {
+// Where a take is played: the noise floor, optional mains hum, the silence before the first note,
+// and (weak-signal takes) a per-segment detection bound replacing the timbre/mode one.
+struct TakeEnv {
+  double noiseRms = 20.0 / 32768.0;  // -64 dBFS
+  double humDbfs = 0.0;              // 0 = no hum; else 60 Hz hum at this RMS level
+  double humH2 = 0.0;                // relative 120 Hz component of the hum
+  double start = 1.5;                // seconds of floor before the first note
+  int segPctOverride = 0;            // > 0: per-segment and overall detection bound
+  double medianMs = -1.0;            // < 0: kTailMedianMs and the p95 window; 0: no timing check;
+                                     // > 0: this median bound and the p95 window
+};
+
+void checkLongPlaying(const LongParam& p, unsigned seed, const TakeEnv& env = {}) {
   const int kNotes = 120;
   std::vector<int64_t> starts;
-  for (int k = 0; k < kNotes; ++k) starts.push_back(int64_t((1.5 + 0.5 * k) * kSr));
-  auto x = noise(1.5 + 0.5 * kNotes + 1.0, 20.0 / 32768.0, seed);
+  for (int k = 0; k < kNotes; ++k) starts.push_back(int64_t((env.start + 0.5 * k) * kSr));
+  auto x = noise(env.start + 0.5 * kNotes + 1.0, env.noiseRms, seed);
+  if (env.humDbfs != 0.0) addHum(x, 60.0, env.humH2, 0.0, env.humDbfs);
   addPlucks(x, starts, p.peak, p.hz, p.harmonic ? kHarmonic : kSine, 0.4, p.replace, seed * 17 + 3);
   auto got = run(x, 480);
   const bool overlapSine = !p.replace && !p.harmonic;
   const bool harmLow = p.harmonic && p.hz < 60.0;
   const bool harmWeak = p.harmonic && (!p.replace || harmLow);
   const double tol = harmLow ? kTailTolHarmLowMs : (p.hz >= 98.0 ? kTailTolMs : kTailTolLowMs);
-  const int segPct = overlapSine ? kDetPctOverlapSineSeg : harmWeak ? kDetPctHarmOverlapSeg : kDetPctDefault;
-  const int totPct = overlapSine ? kDetPctOverlapSineTotal : harmWeak ? kDetPctHarmOverlapTotal : kDetPctDefault;
+  const int segPct = env.segPctOverride > 0 ? env.segPctOverride
+                     : overlapSine        ? kDetPctOverlapSineSeg
+                     : harmWeak           ? kDetPctHarmOverlapSeg
+                                          : kDetPctDefault;
+  const int totPct = env.segPctOverride > 0 ? env.segPctOverride
+                     : overlapSine        ? kDetPctOverlapSineTotal
+                     : harmWeak           ? kDetPctHarmOverlapTotal
+                                          : kDetPctDefault;
   int perSegment[6] = {}, withinTol = 0, matched = 0;
   std::vector<double> errs;
   std::vector<bool> used(got.size(), false);
@@ -290,8 +309,9 @@ void checkLongPlaying(const LongParam& p, unsigned seed) {
     EXPECT_GE(perSegment[s] * 100, 20 * segPct) << "segment " << s * 10 << "-" << s * 10 + 10 << " s";
   EXPECT_GE(matched * 100, kNotes * totPct) << matched << " of " << kNotes << " detected";
   EXPECT_EQ(got.size(), size_t(matched)) << "false onsets";
+  if (env.medianMs == 0.0) return;
   EXPECT_GE(withinTol * 100.0, matched * kTailInTolPct) << withinTol << " of " << matched << " within " << tol << " ms";
-  EXPECT_LE(medianOf(errs), kTailMedianMs);
+  EXPECT_LE(medianOf(errs), env.medianMs < 0.0 ? kTailMedianMs : env.medianMs);
 }
 
 TEST(OnsetDetector, LongContinuousPlayingStaysDetected) { checkLongPlaying({164.8, false, true, 0.3}, 1); }
@@ -313,6 +333,124 @@ INSTANTIATE_TEST_SUITE_P(Continuous, LongPlaying,
                                   (i.param.replace ? "_replace" : "_overlap") + "_pk" +
                                   std::to_string(int(i.param.peak * 100));
                          });
+
+// Continuous playing at low SNR and over mains hum (the weak-interface regime: floor -45..-55
+// dBFS). 3 s of floor, then 120 notes at 120 BPM, tau 0.4 s, replace. The inter-note level is
+// only ~6-12 dB above the floor, so as the pre-play silence leaves the 10 s window p3 climbs to it
+// in several small steps; the floor term must stay at the floor heard before the playing (this
+// collapsed ~13 s into the take at 0be7735 and at c2d954b: 0 notes after 20 s).
+// The peaks are the ones the plain floor guard can see at all: with silence still in the window
+// (first 10 s, where every version behaves alike) 164.8 Hz harmonic and 55 Hz sine at -40 dBFS
+// over -55 dBFS noise, and -34 dBFS over -45 dBFS 60 Hz hum, are missed on some seeds by 0be7735
+// too (their RMS is < 14 dB above 5 x p3), so they cannot test a late collapse.
+// Bounds from seeds 1-20 of each case (worst take): detection per 10 s segment as given (93 =
+// the spec for weak takes, 90 where the worst take had 18 of 20 in a segment); timing as
+// LongPlaying for hum floors, except pure tones over hum + 2nd harmonic (median up to 6 ms: the
+// hum ripple adds to the walk-back stops), and not asserted for -55 dBFS weak takes and the
+// -34 dBFS harmonic take over hum + 2nd harmonic (median up to 9-11 ms, p95 15-18 ms).
+struct FloorParam {
+  LongParam take;
+  double humDbfs, humH2;
+  int segPct;
+  double medianMs;  // 0 = timing not asserted
+};
+
+class LowFloorPlaying : public ::testing::TestWithParam<FloorParam> {};
+
+TEST_P(LowFloorPlaying, StaysDetected) {
+  const auto& p = GetParam();
+  TakeEnv env;
+  env.noiseRms = dbToAmp(-55.0);
+  env.humDbfs = p.humDbfs;
+  env.humH2 = p.humH2;
+  env.start = 3.0;
+  env.segPctOverride = p.segPct;
+  env.medianMs = p.medianMs;
+  checkLongPlaying(p.take, 3, env);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    WeakAndHum, LowFloorPlaying,
+    ::testing::Values(FloorParam{{98.0, true, true, 0.01}, 0.0, 0.0, 90, 0.0},       // -40 dBFS
+                      FloorParam{{98.0, true, true, 0.01413}, 0.0, 0.0, 93, 0.0},    // -37
+                      FloorParam{{164.8, true, true, 0.01413}, 0.0, 0.0, 93, 0.0},   // -37
+                      FloorParam{{55.0, false, true, 0.01413}, 0.0, 0.0, 93, 0.0},   // -37
+                      FloorParam{{164.8, true, true, 0.02818}, -45.0, 0.0, 95, 5.0}, // -31
+                      FloorParam{{164.8, true, true, 0.03981}, -45.0, 0.0, 95, 5.0}, // -28
+                      FloorParam{{164.8, true, true, 0.05623}, -45.0, 0.0, 95, 5.0}, // -25
+                      FloorParam{{164.8, true, true, 0.01995}, -48.0, 0.5, 90, 0.0}, // -34
+                      FloorParam{{164.8, true, true, 0.03981}, -48.0, 0.5, 95, 5.0}, // -28
+                      FloorParam{{164.8, false, true, 0.03981}, -48.0, 0.5, 95, 7.0}),
+    [](const ::testing::TestParamInfo<FloorParam>& i) {
+      const auto& t = i.param.take;
+      return "hz" + std::to_string(int(t.hz * 10)) + (t.harmonic ? "_harm" : "_sine") + "_pk" +
+             std::to_string(int(std::lround(-20.0 * std::log10(t.peak)))) +
+             (i.param.humDbfs == 0.0 ? std::string("_noise55")
+                                     : "_hum" + std::to_string(int(-i.param.humDbfs)) + (i.param.humH2 > 0 ? "h2" : ""));
+    });
+
+// Non-stop playing over hum (60 Hz + 0.5 x 120 Hz, -48 dBFS) when a fan adds noise 12 dB above
+// the old floor at 20 s: the floor heard before playing is kept, so the notes (98 Hz harmonic,
+// peak -30 dBFS, ~10 dB over the fan) stay detected (0be7735 and c2d954b: 10-15 of 63 after the
+// fan started, over seeds 1-20; now 57-63). Known trade-off, asserted as a bound: right after the
+// playing stops the floor term still uses the pre-fan floor until no onset has come for 3 s, so
+// hand ticks +8 dB over the fan can fire then (0-4 per take over seeds 1-20, none later; 0be7735:
+// none, it had stopped detecting the notes instead).
+TEST(OnsetDetector, FanStartingWhilePlayingOverHum) {
+  std::vector<int64_t> starts;
+  for (int k = 0; k < 100; ++k) starts.push_back(int64_t((1.5 + 0.5 * k) * kSr));
+  auto x = noise(80.0, dbToAmp(-55.0), 61);
+  addHum(x, 60.0, 0.5, 0.0, -48.0);
+  addPlucks(x, starts, 0.03, 98.0, kHarmonic, 0.4, true, 62);
+  const auto fan = noise(80.0, dbToAmp(-43.0), 63);
+  for (size_t i = size_t(20.0 * kSr); i < x.size(); ++i) x[i] += fan[i];
+  addTouches(x, 51.5, 79.0, 0.5, dbToAmp(-43.0), 8.0, false, 64);
+  auto got = run(x, 480);
+  int hitsAfter = 0, falseOnsets = 0;
+  for (int64_t g : got) {
+    double best = 1e9;
+    for (int64_t s : starts) best = std::min(best, std::abs(double(g - s)) / kSr * 1000.0);
+    if (best > 30.0) {
+      ++falseOnsets;
+      EXPECT_GE(g, int64_t(51.0 * kSr)) << "false onset while playing";
+    } else if (g >= int64_t(20.0 * kSr)) {
+      ++hitsAfter;
+    }
+  }
+  const auto notesAfter = std::count_if(starts.begin(), starts.end(), [](int64_t s) { return s >= int64_t(20.0 * kSr); });
+  EXPECT_GE(hitsAfter * 100, int(notesAfter) * 90) << hitsAfter << " of " << notesAfter << " notes after the fan started";
+  EXPECT_LE(falseOnsets, 4);
+}
+
+// Hum (60 Hz + 0.5 x 120 Hz at -39 dBFS) switched on mid-session in silence, then G1 / G#1
+// plucks every 4 s: the floor must follow the hum (it is stationary) so the beats of the notes
+// against it are guarded exactly as at 0be7735. oldFalse: 0be7735's count on these signals
+// (c2d954b: 5 and 9, it kept the pre-hum floor).
+TEST(OnsetDetector, HumAppearingInSilence) {
+  const std::pair<unsigned, int> cases[] = {{1u, 4}, {3u, 5}};
+  for (auto [seed, oldFalse] : cases) {
+    auto x = noise(96.0, dbToAmp(-55.0), seed);
+    std::vector<float> hum(x.size() - size_t(20.0 * kSr), 0.0f);
+    addHum(hum, 60.0, 0.5, 0.0, -39.0);
+    for (size_t i = 0; i < hum.size(); ++i) x[size_t(20.0 * kSr) + i] += hum[i];
+    std::vector<int64_t> g1, gs1, starts;
+    for (int k = 0; k < 15; ++k) {
+      const int64_t s = int64_t((35.0 + 4.0 * k) * kSr);
+      (k % 2 ? gs1 : g1).push_back(s);
+      starts.push_back(s);
+    }
+    addPlucks(x, g1, 0.05, 49.0, kHarmonic, 1.0, false, seed + 3);
+    addPlucks(x, gs1, 0.05, 51.9, kHarmonic, 1.0, false, seed + 13);
+    int hits = 0, falseOnsets = 0;
+    for (int64_t g : run(x, 480)) {
+      double best = 1e9;
+      for (int64_t s : starts) best = std::min(best, std::abs(double(g - s)) / kSr * 1000.0);
+      best <= 30.0 ? ++hits : ++falseOnsets;
+    }
+    EXPECT_EQ(hits, 15) << "seed " << seed;
+    EXPECT_LE(falseOnsets, oldFalse) << "seed " << seed;
+  }
+}
 
 // 20 s playing, 30 s of noise only, 20 s playing: both playing phases detected, nothing in the
 // pause (the floor must come back down to the noise and notes after the pause still pass).

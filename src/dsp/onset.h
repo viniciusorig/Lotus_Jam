@@ -8,12 +8,13 @@
 // 15 ms, 120 ms refractory, walk-back to the start of the rise. Decisions (threshold, rise)
 // use a 36-step (36 ms) peak-hold of the 5 ms RMS, flat on low notes down to ~30 Hz; the
 // walk-back uses the raw 5 ms RMS. Threshold = max(5 x noise floor, 0.12 x p99 of the held
-// envelope), both over the last 10 s, where the noise floor is p3 of the raw 5 ms RMS. When
-// the window is not stationary noise (p99 > 8 dB above p3) and p3 jumped more than 6 dB above
-// the last floor seen (continuous playing: the last silence has left the window, so p3 is the
-// inter-note level), the floor term is capped at 0.25 x p99 but never below 5 x that remembered
-// floor, so the inter-note level of a long take is not mistaken for noise while hum, bursts,
-// thumps and ticks still face the full 5 x noise-floor guard (see onset.cpp, kGateRatio).
+// envelope), both over the last 10 s, where the noise floor is p3 of the raw 5 ms RMS. While
+// the player plays non-stop the window holds no silence and p3 becomes the inter-note level (it
+// climbs there in one jump for loud notes, in small steps for weak notes or over hum), so while
+// there is evidence of playing (3 onsets within 3 s, kept until 3 s without any onset) the floor
+// term is capped at 0.25 x p99 but never below 5 x the floor heard in the last stationary window
+// (silence, noise or hum; judged on the held envelope, which hum does not ripple). Without that
+// evidence it is the plain 5 x p3 (see onset.cpp, kGateRatio).
 // Known limits:
 //  - Re-plucks over an undecayed tail: a note is missed when the combined level does not rise
 //    > 6 dB, e.g. a same-pitch note summing with ringing tails at a random phase (up to ~17% of
@@ -23,15 +24,27 @@
 //    the ripple of the 5 ms RMS.
 //  - Notes more than ~18 dB below the loudest of the last 10 s are under 0.12 x p99: after a
 //    drop of ~20 dB in playing level there is a blind spot of up to ~10 s.
-//  - Notes less than ~14 dB above the noise floor (5 x p3) are not detected.
+//  - Notes less than ~14 dB above the noise floor (5 x p3) are not detected, in every version
+//    of this detector: e.g. 164.8 Hz harmonic and 55 Hz sine notes at -40 dBFS peak over -55 dBFS
+//    noise, or -34 dBFS over -45 dBFS 60 Hz hum (whose 5 ms RMS dips only ~3 dB, so 5 x p3 sits
+//    ~11 dB above the hum) are missed even with silence in the window; the tests use -37 / -31.
+//  - Over hum, the walk-back stops on the hum ripple: pure tones at <= -31 dBFS over hum have a
+//    median timing error of 6-16 ms (not asserted by the tests).
 //  - A decaying low note beating against mains hum (e.g. G1/G#1 against 60 Hz with harmonics)
 //    can produce false onsets; this predates the gate and the gate does not add to it.
-//  - If the noise floor rises > 6 dB during non-stop playing, the older, lower floor is kept
-//    until a pause; if the detector starts in the middle of non-stop playing (no silence seen),
-//    the take can collapse as with a plain 5 x p3 floor.
+//  - If the floor rises while playing non-stop (a fan, a gain change), the older floor is kept
+//    until a stationary window or 10 s without onsets: detection holds, but for ~3 s after the
+//    playing stops (longer while events keep firing) low events over the new floor can fire.
+//  - At the edge of the 5 x floor guard (notes < ~14 dB above it, e.g. -40 dBFS peaks over
+//    -55 dBFS noise) detection is patchy from the start; a long run of misses (3 s) drops the
+//    playing evidence and the take can then collapse as at 0be7735.
+//  - A session that starts in the middle of non-stop playing has no silence to take the floor
+//    from and collapses as with a plain 5 x p3 floor: the app must give a count-in / silence.
+//  - Follow-up idea (deferred): measure the floor in the gaps between detected onsets instead
+//    of from p3, which would remove the playing-evidence heuristic and its trade-offs.
 // No onsets are reported in the first second (warm-up). Onsets are absolute sample indices
-// since construction and do not depend on how the stream is chunked. The constructor allocates; feed() does not
-// (apart from growth of the caller's `onsetsOut`).
+// since construction and do not depend on how the stream is chunked. The constructor allocates;
+// feed() does not (apart from growth of the caller's `onsetsOut`).
 class OnsetDetector {
 public:
     explicit OnsetDetector(double sampleRate = 48000);
@@ -64,6 +77,10 @@ private:
     int64_t lastOnset_ = -10000;
     double thr_ = 0.0;
     bool haveThr_ = false;
-    // Remembered noise floor (see kFloorMemRiseDb in onset.cpp); < 0 until the first update.
-    double floorMem_ = -1.0;
+    // Floor (p3) of the last stationary window (< 0 until the first update), the steps of the
+    // last 3 onsets and the playing evidence derived from them. See kGateRatio in onset.cpp.
+    double anchor_ = -1.0;
+    int64_t recent_[3] = {-1000000, -1000000, -1000000};
+    int recentPos_ = 0;
+    bool playing_ = false;
 };

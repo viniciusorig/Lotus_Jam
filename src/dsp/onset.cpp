@@ -34,32 +34,40 @@ constexpr float kStepDb = 0.2f;
 constexpr double kFloorMult = 5.0;
 constexpr int64_t kResync = 1000;  // steps between exact recomputations of the running sum
 constexpr double kPeakFrac = 0.12;
-// Floor-term gate (continuous playing). The floor term 5 x p3 assumes the 10 s window holds
-// some real silence. When the player never stops (e.g. 120 BPM, tau 0.4 s: the level falls only
-// ~11 dB between plucks), p3 converges to the INTER-NOTE level and 5 x p3 (+14 dB) ends above
-// the note peaks: detection collapsed ~11 s into the take.
-// The gate opens when p99(held) > kGateRatio x p3(raw), i.e. the window is not plain stationary
-// noise (2.0-2.3 dB for noise of any level). It is NOT evidence of playing: hum with a 2nd/3rd
-// harmonic (the 5 ms RMS ripples), noise bursts, thumps and ticks open it too, and so does every
-// continuous take (>= 10.8 dB). So the open gate only allows the floor term to be capped at
-// kGateCap x p99, and never below 5 x the remembered floor floorMem_:
-//   - floorMem_ = p3 while the gate is closed, and whenever p3 is no more than kFloorMemSnap
-//     (+6 dB) above it, so it follows the noise floor of hum, bursts, touches and beating
-//     exactly (there the threshold is the plain 5 x p3 again, as before the gate existed);
-//   - it is held when p3 jumps more than 6 dB above it with the gate open, which is what
-//     happens when the last real silence leaves the window during non-stop playing: p3 jumps
-//     from the noise to the inter-note level in one 0.5 s update.
-// The floor term while playing non-stop is therefore max(0.25 x p99, 5 x the noise floor seen
-// before the playing started), not 5 x the inter-note level. Without that lower bound only the
-// 6 dB / 15 ms rise test was left as a guard, and it does not stop non-stationary low-level
-// events (bursts, thumps, beating of a decaying note with hum).
-// Known limits: if the noise floor itself rises > 6 dB during non-stop playing, floorMem_ keeps
-// the older, lower value until the gate closes (a pause) or p3 comes back within 6 dB; if the
-// detector starts in the middle of non-stop playing (no silence ever seen), floorMem_ is the
-// inter-note level and the take collapses as before the gate existed.
-constexpr double kGateRatio = 2.5;     // 8 dB
-constexpr double kGateCap = 0.25;      // -12 dB below the peak reference
-constexpr double kFloorMemSnap = 2.0;  // +6 dB
+// Floor term while playing non-stop. The floor term 5 x p3 assumes the 10 s window holds some
+// real silence. When the player never stops (e.g. 120 BPM, tau 0.4 s: the level falls only
+// ~11 dB between plucks) p3 converges to the INTER-NOTE level, 5 x p3 (+14 dB) ends above the
+// notes, and detection collapses ~11 s into the take. As the last silence leaves the window, p3
+// climbs to the inter-note level in one jump when that level is far above the floor, but in
+// several steps of <= 3 dB per 0.5 s update when it is only ~6-12 dB above it (weak notes, a hum
+// floor whose 5 ms RMS ripple puts p3 close to the inter-note level), so no per-update test on p3
+// can tell the two apart. Instead:
+//   - anchor_ (the floor heard in silence) = p3 only when the window is stationary: p99 of the
+//     HELD envelope within kStationaryRatio (3 dB) of its p3. The 36 ms hold flattens the 5 ms
+//     RMS ripple of 50/60 Hz hum, so noise and hum of any shape measure 0.2-1.0 dB (median) and
+//     are followed when they appear or change, while continuous playing measures >= 4.6 dB even
+//     at -40 dBFS peaks over -55 dBFS noise, and bursts/thumps/ticks are not stationary either.
+//     anchor_ also takes p3 once no onset has come for a whole window (10 s), and at the start.
+//   - playing_ (evidence of playing) is set by kEvidenceOnsets onsets within kEvidenceSteps and
+//     cleared only after kReleaseSteps without any onset, so a few missed weak notes do not drop
+//     it (a shorter release, 1-1.5 s, let patchy takes lose it and collapse for good).
+//   - Only with playing_ and the gate open (p99(held) > kGateRatio x p3(raw)) is the floor term
+//     lowered, to min(5 x p3, max(kGateCap x p99, 5 x anchor_)): never below 5 x the floor heard
+//     before the playing. Without playing evidence it is the plain 5 x p3, so hum, hiss bursts,
+//     thumps, clicks, ticks in a pause and sparse notes beating against hum face exactly the
+//     guard they faced before any of this existed (0be7735).
+// Known trade-offs: if the floor rises while playing non-stop (a fan, a gain change), anchor_
+// keeps the older floor until a stationary window or 10 s without onsets, so for up to ~3 s
+// after the playing stops (longer if events keep firing) low events over the new floor can be
+// reported; a session that starts in the middle of non-stop playing has no silence to anchor
+// on and collapses as at 0be7735 (the app must give a count-in / silence first).
+constexpr double kGateRatio = 2.5;         // 8 dB
+constexpr double kGateCap = 0.25;          // -12 dB below the peak reference
+constexpr double kStationaryRatio = 1.41;  // 3 dB, on the held envelope
+constexpr int kEvidenceOnsets = 3;         // onsets ...
+constexpr int64_t kEvidenceSteps = 3000;   // ... within 3 s set playing_
+constexpr int64_t kReleaseSteps = 3000;    // 3 s without any onset clears it
+static_assert(kEvidenceOnsets == 3, "recent_ holds the last 3 onsets");
 }  // namespace
 
 OnsetDetector::OnsetDetector(double sampleRate)
@@ -106,11 +114,17 @@ void OnsetDetector::updateThreshold() {
     double floorEnv = percentile(lin_.data(), n, kFloorPercentile);
     for (size_t i = 0; i < n; ++i) lin_[i] = env_[(start + i) % kEnvHistory];
     double peakEnv = percentile(lin_.data(), n, 0.99);
-    const bool gateOpen = peakEnv > kGateRatio * floorEnv;
-    if (floorMem_ < 0.0 || !gateOpen || floorEnv <= kFloorMemSnap * floorMem_) floorMem_ = floorEnv;
+    const double heldFloor = percentile(lin_.data(), n, kFloorPercentile);
+    // See kGateRatio: anchor_ follows the floor only through stationary windows (or a whole
+    // window without onsets); playing_ is set by kEvidenceOnsets recent onsets, released late.
+    if (anchor_ < 0.0 || peakEnv <= kStationaryRatio * heldFloor || steps_ - lastOnset_ > int64_t(kEnvHistory))
+        anchor_ = floorEnv;
+    const int64_t oldestRecent = std::min({recent_[0], recent_[1], recent_[2]});
+    if (steps_ - oldestRecent <= kEvidenceSteps) playing_ = true;
+    if (steps_ - lastOnset_ > kReleaseSteps) playing_ = false;
     double floorTerm = kFloorMult * floorEnv;
-    if (gateOpen)
-        floorTerm = std::min(floorTerm, std::max(kGateCap * peakEnv, kFloorMult * floorMem_));
+    if (playing_ && peakEnv > kGateRatio * floorEnv)
+        floorTerm = std::min(floorTerm, std::max(kGateCap * peakEnv, kFloorMult * anchor_));
     thr_ = std::max(floorTerm, kPeakFrac * peakEnv);
     haveThr_ = true;
 }
@@ -151,6 +165,8 @@ void OnsetDetector::step(std::vector<int64_t>& out) {
         // WIN/2 onsets were systematically 1.5-3.5 ms early; this gives |error| <= 1 ms.
         out.push_back(j * int64_t(hop_) + int64_t(win_));
         lastOnset_ = m;
+        recent_[recentPos_] = m;
+        recentPos_ = (recentPos_ + 1) % 3;
     }
 }
 
