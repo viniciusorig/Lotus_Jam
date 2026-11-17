@@ -710,6 +710,37 @@ TEST(FakeBackend, PausesAtVirtualTime) {
     f.stop();
 }
 
+// scheduleTone: a constant-amplitude sine between startSec and endSec (short ramps), for
+// sustained-pitch tests (the tuner UI); scheduleNote keeps its decaying envelope.
+TEST(FakeBackend, SustainedTone) {
+    FakeBackend::Options o;
+    o.speed = 50;
+    o.backpressure = true;
+    o.inputLatencySec = 0.0;
+    o.pauseAtSec = o.startSec + 2.0;
+    o.inputCapacity = size_t(1) << 17;  // 2.73 s: holds the whole take
+    FakeBackend f(o);
+    const double t0 = f.nowSec();
+    f.scheduleTone(t0 + 0.5, t0 + 1.5, 100.0, 0.4);
+    std::string err;
+    ASSERT_TRUE(f.start(err)) << err;
+    ASSERT_TRUE(waitUntil([&] { return f.nowSec() >= o.pauseAtSec; }));
+    std::vector<float> x(size_t(2.0 * kSr));
+    ASSERT_EQ(f.input().read(x.data(), x.size()), x.size());
+    f.stop();
+    auto rms = [&](double a, double b) {
+        double s = 0;
+        const size_t i0 = size_t(a * kSr), i1 = size_t(b * kSr);
+        for (size_t i = i0; i < i1; ++i) s += double(x[i]) * x[i];
+        return std::sqrt(s / double(i1 - i0));
+    };
+    EXPECT_LT(rms(0.0, 0.49), 1e-6);
+    // No decay: the first and the last part of the tone have the full amplitude (0.4/sqrt 2).
+    EXPECT_NEAR(rms(0.55, 0.75), 0.4 / std::sqrt(2.0), 0.01);
+    EXPECT_NEAR(rms(1.25, 1.45), 0.4 / std::sqrt(2.0), 0.01);
+    EXPECT_LT(rms(1.51, 2.0), 1e-6);
+}
+
 TEST(FakeBackend, SeveralDropWindows) {
     FakeBackend::Options o;
     o.speed = 50;

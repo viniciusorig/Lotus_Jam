@@ -64,7 +64,13 @@ bool FakeBackend::failed(std::string& err) const {
 }
 
 void FakeBackend::scheduleNote(double tSec, double hz, double amp) {
-    const Note n{tSec, hz, amp};
+    const Note n{tSec, hz, amp, -1.0};
+    pending_.write(&n, 1);
+}
+
+void FakeBackend::scheduleTone(double startSec, double endSec, double hz, double amp) {
+    if (!(endSec > startSec)) return;
+    const Note n{startSec, hz, amp, endSec};
     pending_.write(&n, 1);
 }
 
@@ -97,12 +103,24 @@ void FakeBackend::renderInput(float* x, size_t n, int64_t firstFrame) {
     for (size_t v = 0; v < kVoices; ++v) {
         if (!used_[v]) continue;
         const Note& note = voices_[v];
-        if (note.t + kNoteLenSec < tFirst) {
+        const bool sustained = note.end >= 0.0;
+        const double last = sustained ? note.end : note.t + kNoteLenSec;
+        if (last < tFirst) {
             used_[v] = false;
             continue;
         }
         if (note.t >= tEnd) continue;
         const double w = 2.0 * std::numbers::pi * note.hz;
+        if (sustained) {
+            const double len = note.end - note.t;
+            for (size_t i = 0; i < n; ++i) {
+                const double dt = tFirst + double(i) / kSampleRate - note.t;
+                if (dt < 0.0 || dt >= len) continue;
+                const double env = std::min({1.0, dt / kAttackSec, (len - dt) / kAttackSec});
+                x[i] += float(note.amp * env * std::sin(w * dt));
+            }
+            continue;
+        }
         for (size_t i = 0; i < n; ++i) {
             const double dt = tFirst + double(i) / kSampleRate - note.t;
             if (dt < 0.0 || dt >= kNoteLenSec) continue;

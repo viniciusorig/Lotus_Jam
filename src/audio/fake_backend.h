@@ -68,6 +68,9 @@ public:
     // tSec (virtual clock). Single producer: call from one thread (any time). At most 1024
     // pending notes; extra notes are ignored.
     void scheduleNote(double tSec, double hz, double amp);
+    // Adds a sustained sine of constant amplitude `amp` (4 ms linear fade in and out) captured
+    // between startSec and endSec (virtual clock). Same queue and limits as scheduleNote.
+    void scheduleTone(double startSec, double endSec, double hz, double amp);
     // Test hook: input produced from capture time atSec on is discarded as if the input ring
     // were full, for `frames` frames extended to the end of the block they end in (like a full
     // ring, which keeps the head of a block and drops the rest). May be called several times
@@ -88,6 +91,7 @@ public:
 private:
     struct Note {
         double t, hz, amp;
+        double end = -1.0;  // sustained tone until `end`; < 0: decaying note (scheduleNote)
     };
     void run();
     void renderInput(float* x, size_t n, int64_t firstFrame);

@@ -12,7 +12,8 @@ namespace {
 constexpr double kSampleRate = 48000.0;
 constexpr int64_t kLevelEvery = 2400;  // input frames per Level event (~20 Hz)
 constexpr double kBeatLeadSec = 0.3;   // Beat events are emitted this far ahead
-constexpr double kSummaryEverySec = 0.25;
+// Summary snapshot rate: a display concern, so wall time (the backend clock may be paused).
+constexpr auto kSummaryEvery = std::chrono::milliseconds(250);
 constexpr double kWarnEverySec = 5.0;
 const char* const kOverloadText = "Entrada de áudio sobrecarregada: algumas notas podem ter sido ignoradas.";
 constexpr size_t kMaxRecordFrames = size_t(600 * kSampleRate);  // 10 min cap
@@ -312,7 +313,7 @@ void Session::scoringLoop() {
     std::string err;
     const bool training = cfg_.mode == Mode::Training;
     int64_t nextBeat = 0;
-    double lastRefresh = -std::numeric_limits<double>::infinity();
+    auto lastRefresh = std::chrono::steady_clock::now() - kSummaryEvery;
     double lastWarn = -std::numeric_limits<double>::infinity();
     uint64_t warnedDropped = 0, warnedEvictions = 0;
     bool dirty = true;
@@ -408,10 +409,10 @@ void Session::scoringLoop() {
                     ++nextBeat;
                 }
             }
-            const double now = backend_->nowSec();
-            if (dirty && now - lastRefresh >= kSummaryEverySec) {
+            const auto wall = std::chrono::steady_clock::now();
+            if (dirty && wall - lastRefresh >= kSummaryEvery) {
                 refreshSummary();
-                lastRefresh = now;
+                lastRefresh = wall;
                 dirty = false;
             }
         }

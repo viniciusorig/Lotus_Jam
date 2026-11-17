@@ -90,7 +90,8 @@ public:
     void stop();
     // Appends the pending events to `out`; true if any was appended.
     bool pollEvents(std::vector<UiEvent>& out);
-    // Snapshot refreshed by the scoring thread at most every 250 ms and at stop.
+    // Snapshot refreshed by the scoring thread at most every 250 ms of wall time (also while
+    // the backend clock is paused) and at stop.
     GridScorer::Summary summary() const;
     // Records `seconds` of raw input (16-bit mono 48 kHz WAV at wavPath), starting with the
     // next input block of the running session; ignored when no session runs. A session that
