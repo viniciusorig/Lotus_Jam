@@ -23,15 +23,21 @@
 // matched to a jump. A jump g (frames) between consecutive points is a gap when
 //   min(g, pending) >= kMinGapFrames  and  g <= pending + kJitterFrames,
 // and it consumes min(g, pending). The measured jump of a drop is drop + (jitter after -
-// jitter before), so kJitterFrames (5 ms) allows for several ms of timestamp jitter; without
-// pending drops jitter never splits. Drops too small to locate (< kMinGapFrames, 0.5 ms) never
-// split: they are absorbed into the fit (error <= their size). Pending frames still unmatched
+// jitter before). Real timestamps jitter by ~2 ms (sigma) per point, so a jump's jitter has
+// sigma ~2.8 ms and a single late point (a scheduling hiccup) can add 10 ms or more;
+// kJitterFrames (20 ms) covers that: a drop the rule misses maps every later frame wrong by
+// the drop size, while a too-wide allowance can only split a pending drop at a slightly wrong
+// point. Without pending drops jitter never splits. Drops too small to locate
+// (< kMinGapFrames, 0.5 ms) never split: they are absorbed into the fit (error <= their size). Pending frames still unmatched
 // once a point captured more than kMatchSec after the observation (backend time, `nowSec`
 // passed with the batch) has been processed are absorbed too (a small drop, or the
 // jitter-hidden remainder of a matched one), so `pending` always drains and cannot arm later
-// jitter for long. This is safe whatever the batching or thread preemption: the increment
-// happened before the observation and the post-drop TimePoint is pushed at most one period
-// after the increment, so its capture time is before observation + one period.
+// jitter for long. This is safe whatever the batching, thread preemption or drop length: the
+// observed increment happened before the observation, so every point before the drop was
+// captured before it (up to jitter), and no TimePoint is pushed during the drop. The first
+// point processed with a capture time past observation + kMatchSec is therefore at or after
+// the post-drop point, and since addOne() runs before the clear check, the post-drop point
+// (the one carrying the jump) is always matched against the pending amount before it clears.
 //
 // Memory and pruning. The scoring thread reads TimePoints up to the backend's head while the
 // analysis (and so the onsets) can lag by the whole input ring, so many gaps may lie between
@@ -121,7 +127,7 @@ private:
     }
 
     static constexpr double kMinGapFrames = 24.0;   // 0.5 ms at 48 kHz
-    static constexpr double kJitterFrames = 240.0;  // 5 ms timestamp-jitter allowance
+    static constexpr double kJitterFrames = 960.0;  // 20 ms timestamp-jitter allowance
     static constexpr double kMatchSec = 0.05;       // > one period + timestamp jitter
     static constexpr size_t kMaxObs = 64;
     struct Segment {
