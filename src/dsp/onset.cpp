@@ -12,11 +12,9 @@ constexpr int64_t kRiseSteps = 15;
 constexpr int kMaxWalkBack = 20;
 constexpr double kRiseDb = 6.0;
 constexpr float kStepDb = 0.2f;
-// Noise-floor multiplier. The prototype used 5x the 20th percentile; that is 14 dB above the
-// floor and rejects the weak bass through the PCM2902 (-39 dBFS peak over a -55 dBFS floor),
-// so the threshold sits 10 dB above the floor instead. Stationary noise stays far below it
-// (and cannot rise 6 dB in 15 ms); see tests.
-constexpr double kFloorMult = 3.0;
+// Noise-floor multiplier (spec value; to be retuned later with the real bass).
+constexpr double kFloorMult = 5.0;
+constexpr int64_t kResync = 1000;  // steps between exact recomputations of the running sum
 constexpr double kPeakFrac = 0.12;
 }  // namespace
 
@@ -61,6 +59,11 @@ void OnsetDetector::updateThreshold() {
 
 void OnsetDetector::step(std::vector<int64_t>& out) {
     const int64_t m = steps_;
+    if (m % kResync == 0) {  // bound floating-point drift of the running sum
+        double s = 0.0;
+        for (double q : sq_) s += q;
+        sum_ = s;
+    }
     double e = std::sqrt(std::max(sum_, 0.0) / double(win_)) + 1e-9;
     env_[size_t(m) % kEnvHistory] = float(e);
     db_[size_t(m) % kDbHistory] = float(20.0 * std::log10(e));
