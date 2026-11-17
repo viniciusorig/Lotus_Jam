@@ -23,7 +23,9 @@
 //    average (p95 up to ~19 ms for harmonic notes below 60 Hz), because the walk-back stops on
 //    the ripple of the 5 ms RMS.
 //  - Notes more than ~18 dB below the loudest of the last 10 s are under 0.12 x p99: after a
-//    drop of ~20 dB in playing level there is a blind spot of up to ~10 s.
+//    drop of ~20 dB in playing level there is a blind spot of up to ~10 s, which outlasts the 3 s
+//    release of the playing evidence: a soft continuous section after a >= 20 dB drop collapses
+//    as at 0be7735 (a -12 dB drop recovers in 1-2 s).
 //  - Notes less than ~14 dB above the noise floor (5 x p3) are not detected, in every version
 //    of this detector: e.g. 164.8 Hz harmonic and 55 Hz sine notes at -40 dBFS peak over -55 dBFS
 //    noise, or -34 dBFS over -45 dBFS 60 Hz hum (whose 5 ms RMS dips only ~3 dB, so 5 x p3 sits
@@ -33,8 +35,14 @@
 //  - A decaying low note beating against mains hum (e.g. G1/G#1 against 60 Hz with harmonics)
 //    can produce false onsets; this predates the gate and the gate does not add to it.
 //  - If the floor rises while playing non-stop (a fan, a gain change), the older floor is kept
-//    until a stationary window or 10 s without onsets: detection holds, but for ~3 s after the
-//    playing stops (longer while events keep firing) low events over the new floor can fire.
+//    until a stationary window or 10 s without onsets: detection holds, but after the playing
+//    stops low events over the new floor can fire, and each false onset re-arms the playing
+//    evidence. With a fan +12 dB and handling at >= ~1 low event per second the lowered floor
+//    term can survive ~60-90 s, with 41-66 false onsets per 120 s (0-3 at 0.5 events/s; a +12 dB
+//    gain step behaves as 0be7735).
+//  - A hum that rises while playing freezes the floor for as long as sparse playing continues
+//    (gaps < 10 s): low notes beating against that hum (e.g. G1/G#1) then give ~10 more false
+//    onsets per 45 notes than 0be7735 for the whole take, not only after the playing stops.
 //  - At the edge of the 5 x floor guard (notes < ~14 dB above it, e.g. -40 dBFS peaks over
 //    -55 dBFS noise) detection is patchy from the start; a long run of misses (3 s) drops the
 //    playing evidence and the take can then collapse as at 0be7735.

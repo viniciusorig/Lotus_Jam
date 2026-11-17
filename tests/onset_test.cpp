@@ -484,6 +484,9 @@ TEST(OnsetDetector, RecoversAfterPause) {
 }
 
 // ---- Non-stationary disturbances: the continuous-playing fix must keep the noise guard. ----
+// HumWithLowNotes, HumAppearingInSilence and FanStartingWhilePlayingOverHum are characterisation
+// guards: their false-onset bounds are 0be7735's own counts on the same signals (or a measured
+// trade-off bound), not a claim that these inputs give no false onsets.
 // The p99/p3 gate opens for anything that is not stationary noise (hum with harmonics, bursts,
 // thumps, ticks), so these assert that the floor guard still holds there: never more false
 // onsets (and never fewer notes) than the plain 5 x p3 floor that preceded the gate.
