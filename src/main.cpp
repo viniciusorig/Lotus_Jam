@@ -13,6 +13,7 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QApplication::setApplicationName("lotus-jam");
     QApplication::setApplicationDisplayName("Lotus Jam");
+    QGuiApplication::setDesktopFileName("lotus-jam");  // packaging/lotus-jam.desktop (icon, taskbar)
     theme::apply(app);
 
     MainWindow w([](const std::string& in, const std::string& out) -> std::unique_ptr<IAudioBackend> {

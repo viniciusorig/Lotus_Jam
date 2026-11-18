@@ -59,3 +59,14 @@ target_link_libraries(lotus-jam PRIVATE lotus_ui)
 enable_testing()
 add_subdirectory(tests)
 
+# Installation (standard prefix layout): the executable, the launcher and the icons in the
+# hicolor theme. Example: cmake --install build --prefix ~/.local
+include(GNUInstallDirs)
+install(TARGETS lotus-jam RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES ${CMAKE_SOURCE_DIR}/packaging/lotus-jam.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+foreach(size 16 32 64 128 256)
+  install(FILES ${CMAKE_SOURCE_DIR}/resources/icons/lotus_jam_${size}.png
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/${size}x${size}/apps RENAME lotus-jam.png)
+endforeach()
+install(FILES ${CMAKE_SOURCE_DIR}/resources/icons/lotus_jam.svg
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps RENAME lotus-jam.svg)

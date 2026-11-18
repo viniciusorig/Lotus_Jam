@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Lotus Jam
+GenericName=Treino de tempo e afinador
+Comment=Treino de tempo com metrônomo e pontuação, e afinador para baixo, guitarra e violão
+Exec=lotus-jam
+Icon=lotus-jam
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+Keywords=metrônomo;afinador;baixo;guitarra;violão;tempo;treino;
