@@ -9,6 +9,9 @@
 #include <QImage>
 #include <QAbstractItemView>
 #include <QDir>
+#include <QFile>
+#include <QSettings>
+#include <QStandardPaths>
 #include <QFileInfo>
 #include <QLabel>
 #include <QLocale>
@@ -31,6 +34,7 @@
 #include <vector>
 
 #include "app/session.h"
+#include "app/settings.h"
 #include "audio/click_scheduler.h"
 #include "audio/fake_backend.h"
 #include "ui/device_select.h"
@@ -1213,6 +1217,322 @@ TEST(UiSmoke, TunerRestartDebounced) {
     EXPECT_FALSE(t->isRunning());
 }
 
+// ---- settings (Task 12) ----
+// Every test uses its own INI file in a QTemporaryDir: the user's ~/.config/lotus-jam is never
+// read nor written (main() also points XDG_CONFIG_HOME at a temporary directory).
+
+namespace {
+
+const std::string kMic = "alsa_input.pci-0000_00_1f.3.analog-stereo";
+const std::string kPcm = "alsa_input.usb-BurrBrown_from_Texas_Instruments_USB_AUDIO_CODEC-00.analog-stereo";
+const std::string kAnalogOut = "alsa_output.pci-0000_00_1f.3.analog-stereo";
+const std::string kHdmi = "alsa_output.pci-0000_01_00.1.hdmi-stereo";
+
+std::string currentNode(QComboBox* c) { return c->currentData().toString().toStdString(); }
+
+// Releases a blocked test lister when the test returns (also on a failed ASSERT): declared after
+// the window, it runs before the window's destructor joins the listing thread.
+struct ReleaseOnExit {
+    std::atomic<int>& allowed;
+    ~ReleaseOnExit() { allowed = 1 << 20; }
+};
+
+void settle(int ms) {
+    QElapsedTimer e;
+    e.start();
+    while (e.elapsed() < ms) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(2);
+    }
+}
+
+}  // namespace
+
+TEST(UiSmoke, SettingsAppliedOnStartup) {
+    // 1. Saved devices present: they are selected; every control shows its saved value, and
+    //    already before the first scan has finished.
+    {
+        QTemporaryDir dir;
+        ASSERT_TRUE(dir.isValid());
+        QSettings ini(dir.filePath("lotus-jam.conf"), QSettings::IniFormat);
+        Settings s;
+        s.inputNode = kMic;  // not the default (PCM2902)
+        s.outputNode = kAnalogOut;  // not the default (HDMI)
+        s.bpm = 97;
+        s.countInBeats = 8;
+        s.subdivision = 2;
+        s.gainDb = 4.5;
+        s.a4 = 442;
+        s.instrumentId = "guitarra";
+        s.tuningName = "Drop D";
+        s.compensationMs = 21;
+        saveSettings(ini, s);
+        setCompensationFor(ini, kPcm, kHdmi, 5);
+
+        std::atomic<bool> release{false};
+        FakeFactory ff;
+        MainWindow w(ff.make(), [&] {
+            while (!release.load()) QThread::msleep(1);
+            return fakeDevices();
+        }, &ini);
+        TempoTrainingView* v = w.tempoView();
+        TunerWidget* t = w.tunerView();
+        auto checkControls = [&] {
+            EXPECT_EQ(v->bpm(), 97);
+            EXPECT_EQ(v->countInBeats(), 8);
+            EXPECT_EQ(v->subdivision(), 2);
+            EXPECT_DOUBLE_EQ(w.gainSpin()->value(), 4.5);
+            EXPECT_DOUBLE_EQ(t->a4(), 442.0);
+            EXPECT_EQ(t->instrument().id, "guitarra");
+            EXPECT_EQ(t->tuning().name, "Drop D");
+            EXPECT_DOUBLE_EQ(w.compensationSpin()->value(), 21.0);
+        };
+        EXPECT_FALSE(w.devicesReady());
+        checkControls();
+        release = true;
+        ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+        EXPECT_EQ(currentNode(w.inputCombo()), kMic);
+        EXPECT_EQ(currentNode(w.outputCombo()), kAnalogOut);
+        checkControls();
+    }
+    // 2. Saved input absent (USB unplugged): the default device is selected (and that pair's
+    //    compensation shown), but the saved node is kept in the settings, also after a close.
+    {
+        QTemporaryDir dir;
+        QSettings ini(dir.filePath("lotus-jam.conf"), QSettings::IniFormat);
+        Settings s;
+        s.inputNode = "alsa_input.usb-Gone_Interface-00.analog-stereo";
+        s.outputNode = kHdmi;
+        s.compensationMs = 40;
+        saveSettings(ini, s);
+        setCompensationFor(ini, kPcm, kHdmi, 5);
+        FakeFactory ff;
+        MainWindow w(ff.make(), fakeDevices, &ini);
+        ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+        EXPECT_EQ(currentNode(w.inputCombo()), kPcm);
+        EXPECT_EQ(currentNode(w.outputCombo()), kHdmi);
+        EXPECT_DOUBLE_EQ(w.compensationSpin()->value(), 5.0);
+        // A session started on the fallback device does not forget the saved one.
+        w.tempoView()->startButton()->click();
+        ASSERT_TRUE(waitRunning(w, true));
+        w.tempoView()->startButton()->click();
+        ASSERT_TRUE(waitRunning(w, false));
+        w.close();
+        const Settings after = loadSettings(ini);
+        EXPECT_EQ(after.inputNode, s.inputNode);
+        EXPECT_EQ(after.outputNode, kHdmi);
+        EXPECT_DOUBLE_EQ(compensationFor(ini, s.inputNode, kHdmi), 40.0);
+        EXPECT_DOUBLE_EQ(compensationFor(ini, kPcm, kHdmi), 5.0);
+    }
+    // 3. Empty settings: the prototype's defaults (and device_select's devices).
+    {
+        QTemporaryDir dir;
+        QSettings ini(dir.filePath("lotus-jam.conf"), QSettings::IniFormat);
+        FakeFactory ff;
+        MainWindow w(ff.make(), fakeDevices, &ini);
+        ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+        EXPECT_EQ(w.tempoView()->bpm(), 80);
+        EXPECT_EQ(w.tempoView()->countInBeats(), 4);
+        EXPECT_EQ(w.tempoView()->subdivision(), 1);
+        EXPECT_EQ(w.tunerView()->instrument().id, "baixo4");
+        EXPECT_EQ(w.tunerView()->tuning().name, "Padrão");
+        EXPECT_DOUBLE_EQ(w.tunerView()->a4(), 440.0);
+        EXPECT_DOUBLE_EQ(w.gainSpin()->value(), 0.0);
+        EXPECT_DOUBLE_EQ(w.compensationSpin()->value(), 0.0);
+        EXPECT_EQ(currentNode(w.inputCombo()), kPcm);
+        EXPECT_EQ(currentNode(w.outputCombo()), kHdmi);
+    }
+    // 4. Nothing saved and the PCM2902 unplugged: the automatic fallback (first device) is used
+    //    but not saved, so the PCM2902 wins again at the next start once it is back.
+    {
+        QTemporaryDir dir;
+        QSettings ini(dir.filePath("lotus-jam.conf"), QSettings::IniFormat);
+        DeviceLists unplugged = fakeDevices();
+        unplugged.inputs.erase(unplugged.inputs.begin() + 1);
+        FakeFactory ff;
+        {
+            MainWindow w(ff.make(), [unplugged] { return unplugged; }, &ini);
+            ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+            EXPECT_EQ(currentNode(w.inputCombo()), kMic);
+            w.close();
+        }
+        EXPECT_EQ(loadSettings(ini).inputNode, "");
+        MainWindow w(ff.make(), fakeDevices, &ini);
+        ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+        EXPECT_EQ(currentNode(w.inputCombo()), kPcm);
+    }
+}
+
+TEST(UiSmoke, SettingsSavedOnStartAndClose) {
+    QTemporaryDir dir;
+    ASSERT_TRUE(dir.isValid());
+    const QString path = dir.filePath("lotus-jam.conf");
+    QSettings ini(path, QSettings::IniFormat);
+    FakeFactory ff;
+    MainWindow w(ff.make(), fakeDevices, &ini);
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    TempoTrainingView* v = w.tempoView();
+    TunerWidget* t = w.tunerView();
+
+    // Training start saves the training settings and the devices.
+    v->bpmSpin()->setValue(120);  // FakeFactory's grid
+    v->subdivisionCombo()->setCurrentIndex(v->subdivisionCombo()->findData(2));
+    w.gainSpin()->setValue(3.0);
+    w.inputCombo()->setCurrentIndex(w.inputCombo()->findData(QString::fromStdString(kMic)));
+    w.compensationSpin()->setValue(-12.0);
+    v->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, true));
+    {
+        const Settings s = loadSettings(ini);
+        EXPECT_EQ(s.bpm, 120.0);
+        EXPECT_EQ(s.subdivision, 2);
+        EXPECT_EQ(s.gainDb, 3.0);
+        EXPECT_EQ(s.inputNode, kMic);       // chosen by the user
+        EXPECT_EQ(s.outputNode, "");        // automatic (device_select's default): not pinned
+        EXPECT_EQ(compensationFor(ini, kMic, kHdmi), -12.0);
+    }
+    v->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, false));
+
+    // Tuner start saves the tuner settings.
+    selectInstrument(t, "baixo5");
+    t->tuningCombo()->setCurrentIndex(t->tuningCombo()->findText("Meio-tom abaixo"));
+    t->a4Spin()->setValue(443.0);
+    w.tabs()->setCurrentWidget(t);
+    ASSERT_TRUE(waitTuner(w, true));
+    {
+        const Settings s = loadSettings(ini);
+        EXPECT_EQ(s.instrumentId, "baixo5");
+        EXPECT_EQ(s.tuningName, "Meio-tom abaixo");
+        EXPECT_EQ(s.a4, 443.0);
+    }
+
+    // Close saves what changed since (no debounce wait) and it reaches the file on disk.
+    v->countInCombo()->setCurrentIndex(v->countInCombo()->findData(0));
+    w.close();
+    ASSERT_TRUE(waitTuner(w, false));
+    {
+        QSettings fresh(path, QSettings::IniFormat);  // a reader of the file
+        EXPECT_EQ(loadSettings(fresh).countInBeats, 0);
+        QFile f(path);
+        ASSERT_TRUE(f.open(QIODevice::ReadOnly));
+        const QByteArray text = f.readAll();
+        EXPECT_TRUE(text.contains("countInBeats=0")) << text.toStdString();
+        EXPECT_TRUE(text.contains("instrument=baixo5")) << text.toStdString();
+    }
+}
+
+TEST(UiSmoke, CompensationFollowsDevicePair) {
+    QTemporaryDir dir;
+    QSettings ini(dir.filePath("lotus-jam.conf"), QSettings::IniFormat);
+    setCompensationFor(ini, kPcm, kHdmi, 30);
+    setCompensationFor(ini, kMic, kHdmi, 12);
+    FakeFactory ff;
+    MainWindow w(ff.make(), fakeDevices, &ini);
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    QComboBox* in = w.inputCombo();
+    QComboBox* out = w.outputCombo();
+    QDoubleSpinBox* comp = w.compensationSpin();
+    ASSERT_EQ(currentNode(in), kPcm);
+    EXPECT_DOUBLE_EQ(comp->value(), 30.0);
+
+    in->setCurrentIndex(in->findData(QString::fromStdString(kMic)));
+    EXPECT_DOUBLE_EQ(comp->value(), 12.0);
+    comp->setValue(7.0);  // stored for the current pair only
+    EXPECT_DOUBLE_EQ(compensationFor(ini, kMic, kHdmi), 7.0);
+    EXPECT_DOUBLE_EQ(compensationFor(ini, kPcm, kHdmi), 30.0);
+
+    in->setCurrentIndex(in->findData(QString::fromStdString(kPcm)));
+    EXPECT_DOUBLE_EQ(comp->value(), 30.0);
+    out->setCurrentIndex(out->findData(QString::fromStdString(kAnalogOut)));
+    EXPECT_DOUBLE_EQ(comp->value(), 0.0);  // unknown pair: the default
+    EXPECT_DOUBLE_EQ(compensationFor(ini, kPcm, kHdmi), 30.0);  // loading wrote nothing
+    EXPECT_DOUBLE_EQ(compensationFor(ini, kMic, kHdmi), 7.0);
+
+    // A training session uses the shown (pair's) compensation.
+    out->setCurrentIndex(out->findData(QString::fromStdString(kHdmi)));
+    in->setCurrentIndex(in->findData(QString::fromStdString(kMic)));
+    EXPECT_DOUBLE_EQ(comp->value(), 7.0);
+}
+
+// A scan that changes the selection while the tuner runs (the saved USB interface was plugged
+// back in) restarts the tuner exactly once, on the new device, with that pair's compensation.
+TEST(UiSmoke, ScanSelectionChangeRestartsTunerOnce) {
+    QTemporaryDir dir;
+    QSettings ini(dir.filePath("lotus-jam.conf"), QSettings::IniFormat);
+    const std::string usb = "alsa_input.usb-Late_Interface-00.analog-stereo";
+    Settings s;
+    s.inputNode = usb;
+    s.outputNode = kHdmi;
+    saveSettings(ini, s);
+    setCompensationFor(ini, usb, kHdmi, 18);
+    std::atomic<int> scans{0}, allowed{1};
+    DeviceLists plugged = fakeDevices();
+    plugged.inputs.push_back({usb, "Late USB Interface"});
+    FakeFactory ff;
+    MainWindow w(ff.make(), [&] {
+        const int n = scans.fetch_add(1);
+        while (n >= allowed.load()) QThread::msleep(1);
+        return n == 0 ? fakeDevices() : plugged;
+    }, &ini);
+    ReleaseOnExit release{allowed};
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    ASSERT_EQ(currentNode(w.inputCombo()), kPcm);  // the saved interface is absent
+    TunerWidget* t = w.tunerView();
+    w.refreshDevices();  // in flight (a scan never starts under a running session)
+    w.tabs()->setCurrentWidget(t);
+    ASSERT_TRUE(waitTuner(w, true));
+    ASSERT_EQ(ff.in, kPcm);
+    const int starts = ff.starts.load();
+    const int calls = ff.calls;
+
+    allowed = 2;
+    ASSERT_TRUE(pumpUntil([&] { return currentNode(w.inputCombo()) == usb; }));
+    ASSERT_TRUE(pumpUntil([&] { return ff.starts.load() > starts && t->isRunning(); }));
+    settle(800);  // well past the restart debounce
+    EXPECT_EQ(ff.starts.load(), starts + 1);
+    EXPECT_EQ(ff.calls, calls + 1);  // a new backend for the new pair
+    EXPECT_EQ(ff.in, usb);
+    EXPECT_TRUE(t->isRunning());
+    EXPECT_TRUE(w.errorBanner()->isHidden()) << w.errorBanner()->text().toStdString();
+    EXPECT_DOUBLE_EQ(w.compensationSpin()->value(), 18.0);
+}
+
+// A device chosen by the user while a scan is in flight is honoured: the running tuner moves
+// to it (once) and the scan's arrival neither reverts it nor restarts again.
+TEST(UiSmoke, UserSelectionDuringScanHonoured) {
+    std::atomic<int> scans{0}, allowed{1}, listed{0};
+    FakeFactory ff;
+    MainWindow w(ff.make(), [&] {
+        const int n = scans.fetch_add(1);
+        while (n >= allowed.load()) QThread::msleep(1);
+        listed.fetch_add(1);
+        return fakeDevices();
+    });
+    ReleaseOnExit release{allowed};
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    TunerWidget* t = w.tunerView();
+    w.refreshDevices();  // blocked in the lister (a scan never starts under a running session)
+    w.tabs()->setCurrentWidget(t);
+    ASSERT_TRUE(waitTuner(w, true));
+    ASSERT_EQ(ff.in, kPcm);
+    const int starts = ff.starts.load();
+
+    w.inputCombo()->setCurrentIndex(w.inputCombo()->findData(QString::fromStdString(kMic)));
+    ASSERT_TRUE(pumpUntil([&] { return ff.starts.load() > starts && t->isRunning(); }));
+    EXPECT_EQ(ff.in, kMic);
+    allowed = 2;
+    ASSERT_TRUE(pumpUntil([&] { return listed.load() == 2; }));
+    settle(800);
+    EXPECT_EQ(currentNode(w.inputCombo()), kMic);
+    EXPECT_EQ(ff.starts.load(), starts + 1);
+    EXPECT_EQ(ff.in, kMic);
+    EXPECT_TRUE(t->isRunning());
+}
+
 #if defined(__SANITIZE_THREAD__)
 // Qt is not built with ThreadSanitizer: its internal thread pools (image/raster work) synchronise
 // through futexes TSAN cannot see, so allocations inside Qt look racy, and Qt's pooled threads
@@ -1229,6 +1549,12 @@ extern "C" const char* __tsan_default_suppressions() {
 int main(int argc, char** argv) {
     // Never open a visible window on the developer's desktop.
     qputenv("QT_QPA_PLATFORM", "offscreen");
+    // Never touch the user's configuration: any QSettings not given an explicit file would land
+    // in this temporary directory (the tests pass their own temporary INI files anyway).
+    QTemporaryDir config;
+    if (!config.isValid()) return 1;
+    qputenv("XDG_CONFIG_HOME", config.path().toLocal8Bit());
+    QStandardPaths::setTestModeEnabled(true);
     QApplication app(argc, argv);
     theme::apply(app);
     ::testing::InitGoogleTest(&argc, argv);

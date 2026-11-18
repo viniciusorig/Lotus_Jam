@@ -17,6 +17,7 @@ class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 class QPushButton;
+class QSettings;
 class QTabWidget;
 class LevelMeter;
 class TempoTrainingView;
@@ -58,11 +59,23 @@ DeviceLists listPipeWireDevices();
 //  reconcile() applies these rules; it never touches the Session while a start is in flight
 //  (starting_): onStartFinished() calls it again, so a tab change during a start stops the
 //  late session right away.
+//
+// Settings (app/settings.h): loaded in the constructor (the controls show them before the first
+// scan has finished); the saved device nodes are preferred by every scan when present, else the
+// current selection is kept, else device_select's default; a node chosen by the user becomes
+// the preferred (saved) one; automatic choices are never saved (empty = automatic, so a
+// fallback picked while the PCM2902 is unplugged never takes its place).
+// Changing the input or output loads that pair's compensation into COMPENSAÇÃO; editing it stores
+// it for the current pair. Everything is saved when a session starts, 1 s after a change
+// (debounced) and when the window closes (then also written to disk).
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
-    explicit MainWindow(BackendFactory factory, QWidget* parent = nullptr);  // PipeWire listing
-    MainWindow(BackendFactory factory, DeviceLister lister, QWidget* parent = nullptr);
+    // The application: PipeWire listing and QSettings("lotus-jam", "lotus-jam").
+    explicit MainWindow(BackendFactory factory, QWidget* parent = nullptr);
+    // Tests: injected listing and settings. settings == nullptr: nothing is loaded nor saved.
+    // A given QSettings is not owned and must outlive the window.
+    MainWindow(BackendFactory factory, DeviceLister lister, QSettings* settings = nullptr, QWidget* parent = nullptr);
     ~MainWindow() override;
 
     TempoTrainingView* tempoView() const { return tempo_; }
@@ -111,9 +124,21 @@ private:
     void showWarning(const QString& text);
     void lockInputs(bool locked);
     void shutdown();
+    void applySettings();       // loads settings_ into the controls
+    void persistSettings();     // controls -> settings_ (in memory)
+    void flushSettings();       // persistSettings() + write to disk
+    void scheduleSave();
+    void loadPairCompensation();  // the current pair's compensation -> COMPENSAÇÃO
 
     BackendFactory factory_;
     DeviceLister lister_;
+    std::unique_ptr<QSettings> ownSettings_;  // the application's (production constructor)
+    QSettings* settings_ = nullptr;           // null: no persistence
+    std::string prefIn_, prefOut_;  // saved or user-chosen nodes (kept while absent)
+    bool applying_ = false;         // applySettings() / loadPairCompensation() running
+    bool settingsWarned_ = false;
+    QTimer saveTimer_;
+    static constexpr int kSaveDebounceMs = 1000;
 
     std::unique_ptr<Session> session_;
     IAudioBackend* backend_ = nullptr;  // owned by session_

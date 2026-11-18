@@ -8,6 +8,8 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QSettings>
+#include <QSpinBox>
 #include <QStandardPaths>
 #include <QAbstractItemView>
 #include <QFontMetrics>
@@ -18,7 +20,9 @@
 #include <QTabWidget>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <cmath>
 
+#include "app/settings.h"
 #include "audio/pipewire_backend.h"
 #include "ui/level_meter.h"
 #include "ui/pulse_widget.h"
@@ -95,8 +99,9 @@ protected:
 };
 
 // Silent refill (no currentIndexChanged storm: clear() alone emits it with an empty combo);
-// the caller compares the selected node before/after.
-void fillCombo(QComboBox* c, const std::vector<AudioDevice>& devs, int fallback) {
+// the caller compares the selected node before/after. Selection: `preferred` (saved or chosen by
+// the user) if listed, else the previous selection if still listed, else `fallback`.
+void fillCombo(QComboBox* c, const std::vector<AudioDevice>& devs, const std::string& preferred, int fallback) {
     const QSignalBlocker block(c);
     const QString prev = c->currentData().toString();
     c->clear();
@@ -111,9 +116,12 @@ void fillCombo(QComboBox* c, const std::vector<AudioDevice>& devs, int fallback)
     }
     c->view()->setMinimumWidth(widest + 48);  // the popup shows full descriptions
     c->setPlaceholderText(devs.empty() ? QString::fromUtf8("Nenhum dispositivo encontrado") : QString());
+    const int pref = preferred.empty() ? -1 : c->findData(QString::fromStdString(preferred));
     const int keep = prev.isEmpty() ? -1 : c->findData(prev);
-    c->setCurrentIndex(keep >= 0 ? keep : fallback);
+    c->setCurrentIndex(pref >= 0 ? pref : keep >= 0 ? keep : fallback);
 }
+
+std::string nodeOf(const QComboBox* c) { return c->currentData().toString().toStdString(); }
 
 void syncTooltip(QComboBox* c, const QString& fallback) {
     const QString tip = c->currentIndex() >= 0 ? c->itemData(c->currentIndex(), Qt::ToolTipRole).toString() : QString();
@@ -123,15 +131,21 @@ void syncTooltip(QComboBox* c, const QString& fallback) {
 }  // namespace
 
 MainWindow::MainWindow(BackendFactory factory, QWidget* parent)
-    : MainWindow(std::move(factory), DeviceLister(listPipeWireDevices), parent) {}
+    : MainWindow(std::move(factory), DeviceLister(listPipeWireDevices), nullptr, parent) {
+    // Applied before the event loop delivers the first scan (queued to this thread).
+    ownSettings_ = std::make_unique<QSettings>("lotus-jam", "lotus-jam");  // ~/.config/lotus-jam/
+    settings_ = ownSettings_.get();
+    applySettings();
+}
 
-MainWindow::MainWindow(BackendFactory factory, DeviceLister lister, QWidget* parent)
-    : QMainWindow(parent), factory_(std::move(factory)), lister_(std::move(lister)) {
+MainWindow::MainWindow(BackendFactory factory, DeviceLister lister, QSettings* settings, QWidget* parent)
+    : QMainWindow(parent), factory_(std::move(factory)), lister_(std::move(lister)), settings_(settings) {
     theme::initResources();
     setWindowTitle("Lotus Jam");
     setWindowIcon(theme::appIcon());
     events_.reserve(4096);
     buildUi();
+    applySettings();
 
     pollTimer_.setInterval(16);
     connect(&pollTimer_, &QTimer::timeout, this, &MainWindow::poll);
@@ -153,8 +167,13 @@ MainWindow::~MainWindow() {
     // children (removing tabs emits currentChanged).
     tabs_->disconnect(this);
     tuner_->disconnect(this);
-    for (QObject* o : {static_cast<QObject*>(inCombo_), static_cast<QObject*>(outCombo_), static_cast<QObject*>(gain_)})
+    for (QObject* o : {static_cast<QObject*>(inCombo_), static_cast<QObject*>(outCombo_), static_cast<QObject*>(gain_),
+                       static_cast<QObject*>(comp_), static_cast<QObject*>(tempo_->bpmSpin()),
+                       static_cast<QObject*>(tempo_->countInCombo()), static_cast<QObject*>(tempo_->subdivisionCombo())})
         o->disconnect(this);
+    if (saveTimer_.isActive()) persistSettings();  // a change not saved yet (no close)
+    saveTimer_.stop();
+    settings_ = nullptr;  // an injected QSettings may go away right after the window
     tunerArmed_ = false;
     shutdown();
 }
@@ -174,6 +193,7 @@ void MainWindow::shutdown() {
 
 void MainWindow::closeEvent(QCloseEvent* e) {
     tunerArmed_ = false;  // no automatic restart after the window was closed
+    flushSettings();
     shutdown();
     tempo_->setRunning(false);
     tuner_->setRunning(false);
@@ -304,14 +324,32 @@ void MainWindow::buildUi() {
     });
     connect(tuner_, &TunerWidget::configChanged, this, &MainWindow::onTunerConfigChanged);
     // The tuner keeps the device combos and the gain enabled: a change restarts it.
-    // (A scan refills the combos silently; onDevicesListed reports a changed selection once.)
-    connect(inCombo_, &QComboBox::currentIndexChanged, this, [this] {
-        if (!listing_) onTunerConfigChanged();
-    });
-    connect(outCombo_, &QComboBox::currentIndexChanged, this, [this] {
-        if (!listing_) onTunerConfigChanged();
-    });
+    // currentIndexChanged comes only from the user (or tests): a scan refills the combos with
+    // their signals blocked and onDevicesListed reports a changed selection once. A choice made
+    // while a scan is in flight counts (the scan then keeps it: it becomes the preferred node).
+    for (QComboBox* c : {inCombo_, outCombo_})
+        connect(c, &QComboBox::currentIndexChanged, this, [this, c] {
+            const std::string node = nodeOf(c);
+            if (!node.empty()) (c == inCombo_ ? prefIn_ : prefOut_) = node;
+            loadPairCompensation();
+            scheduleSave();
+            onTunerConfigChanged();
+        });
     connect(gain_, &QDoubleSpinBox::valueChanged, this, &MainWindow::onTunerConfigChanged);
+    // Settings: COMPENSAÇÃO belongs to the device pair; the rest is saved debounced.
+    connect(comp_, &QDoubleSpinBox::valueChanged, this, [this](double ms) {
+        if (!settings_ || applying_) return;
+        const std::string in = nodeOf(inCombo_), out = nodeOf(outCombo_);
+        if (!in.empty() && !out.empty()) setCompensationFor(*settings_, in, out, ms);
+    });
+    connect(gain_, &QDoubleSpinBox::valueChanged, this, &MainWindow::scheduleSave);
+    connect(tempo_->bpmSpin(), &QSpinBox::valueChanged, this, &MainWindow::scheduleSave);
+    connect(tempo_->countInCombo(), &QComboBox::currentIndexChanged, this, &MainWindow::scheduleSave);
+    connect(tempo_->subdivisionCombo(), &QComboBox::currentIndexChanged, this, &MainWindow::scheduleSave);
+    connect(tuner_, &TunerWidget::configChanged, this, &MainWindow::scheduleSave);
+    saveTimer_.setSingleShot(true);
+    saveTimer_.setInterval(kSaveDebounceMs);
+    connect(&saveTimer_, &QTimer::timeout, this, &MainWindow::persistSettings);
     // Restart storms: no restart per keystroke, and a burst of changes restarts once.
     gain_->setKeyboardTracking(false);
     tuner_->a4Spin()->setKeyboardTracking(false);
@@ -405,13 +443,14 @@ void MainWindow::onDevicesListed() {
     listing_ = false;
     refresh_->setEnabled(!starting_ && !running_);
     const QString prevIn = inCombo_->currentData().toString(), prevOut = outCombo_->currentData().toString();
-    fillCombo(inCombo_, d.inputs, defaultInputIndex(d.inputs));
-    fillCombo(outCombo_, d.outputs, defaultOutputIndex(d.outputs));
+    fillCombo(inCombo_, d.inputs, prefIn_, defaultInputIndex(d.inputs));
+    fillCombo(outCombo_, d.outputs, prefOut_, defaultOutputIndex(d.outputs));
     const bool selectionChanged =
         inCombo_->currentData().toString() != prevIn || outCombo_->currentData().toString() != prevOut;
     syncTooltip(inCombo_, "Dispositivo de entrada (PipeWire)");
     syncTooltip(outCombo_, QString::fromUtf8("Dispositivo de saída (PipeWire)"));
     const bool first = !devicesReady_;
+    if (first || selectionChanged) loadPairCompensation();
     devicesReady_ = true;
     syncStartAllowed();
     if (!first && selectionChanged) onTunerConfigChanged();  // a running tuner follows the new device
@@ -477,6 +516,7 @@ void MainWindow::startSession(Mode mode) {
         failTuner();
         return;
     }
+    flushSettings();  // what the user starts with is what the next launch shows
     const std::string in = inCombo_->currentData().toString().toStdString();
     const std::string out = outCombo_->currentData().toString().toStdString();
     if (!session_ || in != sessIn_ || out != sessOut_) {
@@ -680,5 +720,77 @@ void MainWindow::dispatchEvents(const std::vector<UiEvent>& events) {
         }
         // Not asked for by Parar: the device failed (its Error is already in the banner).
         setEngine(userStop_ ? Engine::Idle : Engine::Failed);
+    }
+}
+
+// ---- settings ----
+
+void MainWindow::applySettings() {
+    if (!settings_) return;
+    const Settings v = loadSettings(*settings_);
+    applying_ = true;
+    prefIn_ = v.inputNode;
+    prefOut_ = v.outputNode;
+    tempo_->bpmSpin()->setValue(int(std::lround(v.bpm)));
+    if (const int i = tempo_->countInCombo()->findData(v.countInBeats); i >= 0) tempo_->countInCombo()->setCurrentIndex(i);
+    if (const int i = tempo_->subdivisionCombo()->findData(v.subdivision); i >= 0)
+        tempo_->subdivisionCombo()->setCurrentIndex(i);
+    gain_->setValue(v.gainDb);
+    if (const int i = tuner_->instrumentCombo()->findData(QString::fromStdString(v.instrumentId)); i >= 0)
+        tuner_->instrumentCombo()->setCurrentIndex(i);  // rebuilds the tunings
+    if (const int i = tuner_->tuningCombo()->findText(QString::fromStdString(v.tuningName)); i >= 0)
+        tuner_->tuningCombo()->setCurrentIndex(i);
+    tuner_->a4Spin()->setValue(v.a4);
+    comp_->setValue(v.compensationMs);  // the saved pair's (reloaded once the devices are known)
+    applying_ = false;
+    saveTimer_.stop();  // loading is not a change
+}
+
+void MainWindow::loadPairCompensation() {
+    if (!settings_) return;
+    const std::string in = nodeOf(inCombo_), out = nodeOf(outCombo_);
+    if (in.empty() || out.empty()) return;
+    applying_ = true;
+    comp_->setValue(compensationFor(*settings_, in, out));
+    applying_ = false;
+}
+
+void MainWindow::scheduleSave() {
+    if (settings_ && !applying_) saveTimer_.start();
+}
+
+void MainWindow::persistSettings() {
+    saveTimer_.stop();
+    if (!settings_) return;
+    Settings v;
+    const std::string in = nodeOf(inCombo_), out = nodeOf(outCombo_);
+    // Only a device the user chose (now or in an earlier run) is saved, also while it is absent;
+    // an automatic choice is not (empty = device_select's default at every start, so a fallback
+    // picked while the PCM2902 is unplugged never takes its place). The current pair's
+    // compensation is stored by the COMPENSAÇÃO handler.
+    v.inputNode = prefIn_;
+    v.outputNode = prefOut_;
+    // saveSettings stores compensationMs under (inputNode, outputNode): the shown value belongs
+    // to the current pair only.
+    v.compensationMs = v.inputNode == in && v.outputNode == out ? comp_->value()
+                                                                : compensationFor(*settings_, v.inputNode, v.outputNode);
+    if (!in.empty() && !out.empty()) setCompensationFor(*settings_, in, out, comp_->value());
+    v.bpm = tempo_->bpm();
+    v.countInBeats = tempo_->countInBeats();
+    v.subdivision = tempo_->subdivision();
+    v.gainDb = gain_->value();
+    v.a4 = tuner_->a4();
+    v.instrumentId = tuner_->instrument().id;
+    v.tuningName = tuner_->tuning().name;
+    saveSettings(*settings_, v);
+}
+
+void MainWindow::flushSettings() {
+    if (!settings_) return;
+    persistSettings();
+    settings_->sync();  // a few hundred bytes; only on start and close
+    if (settings_->status() != QSettings::NoError && !settingsWarned_) {
+        settingsWarned_ = true;  // once: an unwritable config must not flood the log
+        qWarning("Lotus Jam: could not write the settings to %s", qPrintable(settings_->fileName()));
     }
 }
