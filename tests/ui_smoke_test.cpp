@@ -91,13 +91,20 @@ double jitterMs(int k) {
     return j[k % 16];
 }
 
-// A FakeBackend whose start() fails (as a PipeWire stream that cannot connect).
-struct FailingBackend : FakeBackend {
-    using FakeBackend::FakeBackend;
+// A FakeBackend that counts its start() calls (each Session start/restart) and can fail them
+// (as a PipeWire stream that cannot connect).
+struct TestBackend : FakeBackend {
+    TestBackend(const Options& o, bool fail, std::atomic<int>* starts) : FakeBackend(o), fail_(fail), starts_(starts) {}
     bool start(std::string& err) override {
-        err = "Não foi possível iniciar o áudio (teste).";
-        return false;
+        starts_->fetch_add(1);
+        if (fail_) {
+            err = "Não foi possível iniciar o áudio (teste).";
+            return false;
+        }
+        return FakeBackend::start(err);
     }
+    bool fail_;
+    std::atomic<int>* starts_;
 };
 
 // Factory handing out FakeBackends; remembers the last one and the requested nodes.
@@ -122,6 +129,7 @@ struct FakeFactory {
     std::vector<Tone> tones;
     double pauseAtOffset = 0;
     bool failStart = false;  // the backend's start() fails (helper-thread failure path)
+    std::atomic<int> starts{0};  // backend start() calls (one per Session start)
 
     BackendFactory make() {
         return [this](const std::string& inNode, const std::string& outNode) -> std::unique_ptr<IAudioBackend> {
@@ -138,7 +146,7 @@ struct FakeFactory {
                 o.pauseAtSec = beatTime(cs, t0, countInBeats + notes - 1, o.outputLatencySec) + pauseAfterLastSec;
             if (pauseAtOffset > 0) o.pauseAtSec = t0 + pauseAtOffset;
             pauseAt = o.pauseAtSec;
-            auto f = failStart ? std::make_unique<FailingBackend>(o) : std::make_unique<FakeBackend>(o);
+            auto f = std::make_unique<TestBackend>(o, failStart, &starts);
             last = f.get();
             for (const Tone& t : tones) f->scheduleTone(t0 + t.start, t0 + t.end, t.hz, t.amp);
             for (int k = 0; k < notes; ++k)
@@ -711,9 +719,9 @@ TEST(UiSmoke, TunerShowsStringAndCents) {
         EXPECT_EQ(ff.in, fakeDevices().inputs[1].name);  // the global input/output selection
         EXPECT_EQ(ff.out, fakeDevices().outputs[1].name);
 
-        ASSERT_TRUE(pumpUntil([&] { return t->noteText() == "E2"; }, 30)) << t->statusText().toStdString();
+        ASSERT_TRUE(pumpUntil([&] { return t->noteText() == "E2"; })) << t->statusText().toStdString();
         EXPECT_EQ(t->highlightedString(), 1);
-        ASSERT_TRUE(pumpUntil([&] { return t->centsShown() >= 13.0 && t->centsShown() <= 17.0; }, 30))
+        ASSERT_TRUE(pumpUntil([&] { return t->centsShown() >= 13.0 && t->centsShown() <= 17.0; }))
             << t->centsShown();
         EXPECT_FALSE(t->glowActive());
         // pt-BR readout: "83,12 Hz  •  +15,0 cents".
@@ -740,7 +748,7 @@ TEST(UiSmoke, TunerNoSignalMessage) {
         selectInstrument(t, "violao");
         w.tabs()->setCurrentWidget(t);
         ASSERT_TRUE(waitTuner(w, true));
-        ASSERT_TRUE(pumpUntil([&] { return t->readingCount() >= 10; }, 30));
+        ASSERT_TRUE(pumpUntil([&] { return t->readingCount() >= 10; }));
         EXPECT_EQ(t->statusText().compare("Sem sinal", Qt::CaseInsensitive), 0) << t->statusText().toStdString();
         EXPECT_EQ(t->statusText(), QString("Sem sinal"));
         EXPECT_FALSE(t->glowActive());
@@ -761,15 +769,17 @@ TEST(UiSmoke, TunerNoSignalMessage) {
         selectInstrument(t, "baixo4");
         std::vector<TunerReading> seen;
         int trailingUnvoiced = 0;
+        bool sawE1 = false;  // observed per reading: independent of when the UI polls
         QObject::connect(t, &TunerWidget::readingApplied, t, [&](const TunerReading& r) {
             seen.push_back(r);
             trailingUnvoiced = r.voiced ? 0 : trailingUnvoiced + 1;
+            if (r.voiced && r.stringIndex == 0 && t->noteText() == "E1") sawE1 = true;
         });
         w.tabs()->setCurrentWidget(t);
         ASSERT_TRUE(waitTuner(w, true));
-        ASSERT_TRUE(pumpUntil([&] { return t->noteText() == "E1"; }, 30));
+        ASSERT_TRUE(pumpUntil([&] { return sawE1; }));
         // 60 Hz and 440 Hz (and the gaps) are 5 s of input: ~100 unvoiced readings follow E1.
-        ASSERT_TRUE(pumpUntil([&] { return trailingUnvoiced >= 80; }, 30)) << trailingUnvoiced;
+        ASSERT_TRUE(pumpUntil([&] { return trailingUnvoiced >= 80; })) << trailingUnvoiced;
         for (const TunerReading& r : seen)
             if (r.voiced) {
                 EXPECT_NEAR(r.hz, hzOf(28, 0.0), 1.0) << "voiced reading at " << r.hz << " Hz";
@@ -782,7 +792,10 @@ TEST(UiSmoke, TunerNoSignalMessage) {
 
 TEST(UiSmoke, TunerGlowWhenInTune) {
     FakeFactory ff;
-    ff.tones = {{0.1, 2.0, 82.41, 0.3}, {2.5, 1e6, hzOf(40, 20.0), 0.3}};
+    // The virtual clock freezes inside the in-tune tone: the last reading is in tune whatever
+    // the wall-clock pace of the UI.
+    ff.tones = {{0.1, 1e6, 82.41, 0.3}};
+    ff.pauseAtOffset = 1.5;
     MainWindow w(ff.make(), fakeDevices);
     w.resize(1180, 780);
     w.show();
@@ -791,19 +804,31 @@ TEST(UiSmoke, TunerGlowWhenInTune) {
     selectInstrument(t, "violao");
     w.tabs()->setCurrentWidget(t);
     ASSERT_TRUE(waitTuner(w, true));
-    ASSERT_TRUE(pumpUntil([&] { return t->glowActive(); }, 30)) << t->statusText().toStdString();
+    ASSERT_TRUE(pumpUntil([&] { return t->glowActive(); })) << t->statusText().toStdString();
     EXPECT_EQ(t->noteText(), QString("E2"));
     EXPECT_EQ(t->highlightedString(), 1);
     EXPECT_TRUE(t->animating());  // the glow ring pulses while in tune
-    ASSERT_TRUE(pumpUntil([&] { return std::fabs(t->centsShown()) < 2.0; }, 30));
+    ASSERT_TRUE(pumpUntil([&] { return std::fabs(t->centsShown()) < 2.0; }));
     EXPECT_TRUE(w.grab().save(UI_TUNER_INTUNE_PNG));
-    // +20 cents: no glow.
-    ASSERT_TRUE(pumpUntil([&] { return t->centsShown() > 18.0; }, 30)) << t->centsShown();
-    EXPECT_FALSE(t->glowActive());
-    EXPECT_EQ(t->noteText(), QString("E2"));
     t->startButton()->click();
     ASSERT_TRUE(waitTuner(w, false));
     EXPECT_FALSE(t->glowActive());
+
+    // +20 cents (sustained): no glow.
+    FakeFactory ff2;
+    ff2.tones = {{0.1, 1e6, hzOf(40, 20.0), 0.3}};
+    MainWindow w2(ff2.make(), fakeDevices);
+    ASSERT_TRUE(pumpUntil([&] { return w2.devicesReady(); }));
+    TunerWidget* t2 = w2.tunerView();
+    selectInstrument(t2, "violao");
+    bool glowSeen = false;
+    QObject::connect(t2, &TunerWidget::readingApplied, t2, [&] { glowSeen = glowSeen || t2->glowActive(); });
+    w2.tabs()->setCurrentWidget(t2);
+    ASSERT_TRUE(waitTuner(w2, true));
+    ASSERT_TRUE(pumpUntil([&] { return t2->centsShown() > 18.0; })) << t2->centsShown();
+    EXPECT_FALSE(t2->glowActive());
+    EXPECT_FALSE(glowSeen);
+    EXPECT_EQ(t2->noteText(), QString("E2"));
 }
 
 TEST(UiSmoke, TunerSwitchesInstrument) {
@@ -983,13 +1008,13 @@ TEST(UiSmoke, TunerRestartsOnConfigChange) {
     w.tabs()->setCurrentWidget(t);
     ASSERT_TRUE(waitTuner(w, true));
     FakeBackend* f = ff.last;
-    ASSERT_TRUE(pumpUntil([&] { return t->readingCount() >= 10; }, 30));
+    ASSERT_TRUE(pumpUntil([&] { return t->readingCount() >= 10; }));
     EXPECT_EQ(t->statusText(), QString("Sem sinal"));
 
     double s0 = f->streamStartSec();
     selectInstrument(t, "baixo4");
     ASSERT_TRUE(pumpUntil([&] { return t->isRunning() && f->streamStartSec() > s0; }));
-    ASSERT_TRUE(pumpUntil([&] { return t->noteText() == "E1"; }, 30)) << t->statusText().toStdString();
+    ASSERT_TRUE(pumpUntil([&] { return t->noteText() == "E1"; })) << t->statusText().toStdString();
     EXPECT_EQ(t->highlightedString(), 1);
 
     s0 = f->streamStartSec();
@@ -1049,7 +1074,7 @@ TEST(UiSmoke, TunerCloseDuringSessionIsClean) {
     ASSERT_TRUE(pumpUntil([&] { return w->devicesReady(); }));
     w->tabs()->setCurrentWidget(w->tunerView());
     ASSERT_TRUE(waitTuner(*w, true));
-    ASSERT_TRUE(pumpUntil([&] { return w->tunerView()->glowActive(); }, 30));
+    ASSERT_TRUE(pumpUntil([&] { return w->tunerView()->glowActive(); }));
     w->close();
     EXPECT_FALSE(w->tunerView()->isRunning());
     w.reset();  // stops the session, joins its threads, then destroys the widgets
@@ -1062,6 +1087,130 @@ TEST(UiSmoke, TunerCloseDuringSessionIsClean) {
     w2.reset();
     QCoreApplication::processEvents();
     SUCCEED();
+}
+
+// A device scan (↻) that lands while a session runs neither fails nor restarts it: the combo
+// refill is silent; only a change of the selected nodes would restart the tuner (once).
+TEST(UiSmoke, DeviceScanDuringSessionKeepsIt) {
+    std::atomic<int> scans{0}, allowed{1};
+    std::atomic<int> listed{0};
+    const DeviceLists normal = fakeDevices();
+    DeviceLists swapped = normal;  // same devices, other order: the selection must not move
+    std::swap(swapped.inputs[0], swapped.inputs[1]);
+    std::swap(swapped.outputs[0], swapped.outputs[1]);
+    FakeFactory ff;
+    MainWindow w(ff.make(), [&] {
+        const int n = scans.fetch_add(1);
+        while (n >= allowed.load()) QThread::msleep(1);
+        listed.fetch_add(1);
+        return n % 2 == 1 ? swapped : normal;
+    });
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    const std::string in = w.inputCombo()->currentData().toString().toStdString();
+    const std::string out = w.outputCombo()->currentData().toString().toStdString();
+    TunerWidget* t = w.tunerView();
+    TempoTrainingView* v = w.tempoView();
+    auto settle = [] {
+        for (int i = 0; i < 40; ++i) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+            QThread::msleep(2);
+        }
+    };
+
+    // 1. Tuner: scan in flight, the tuner starts, the scan lands.
+    w.refreshDevices();
+    w.tabs()->setCurrentWidget(t);
+    ASSERT_TRUE(waitTuner(w, true));
+    const int starts = ff.starts.load();
+    allowed = 2;
+    ASSERT_TRUE(pumpUntil([&] { return w.inputCombo()->itemData(0).toString().toStdString() == swapped.inputs[0].name; }));
+    settle();
+    EXPECT_TRUE(w.errorBanner()->isHidden()) << w.errorBanner()->text().toStdString();
+    EXPECT_TRUE(t->isRunning());
+    EXPECT_EQ(t->startButton()->text(), QString("Parar"));
+    EXPECT_EQ(ff.starts.load(), starts) << "the tuner was restarted by the scan";
+    EXPECT_EQ(w.inputCombo()->currentData().toString().toStdString(), in);
+    EXPECT_EQ(w.outputCombo()->currentData().toString().toStdString(), out);
+    EXPECT_EQ(ff.calls, 1);
+
+    // 2. Training: scan in flight, training starts, the scan lands.
+    w.tabs()->setCurrentWidget(v);
+    ASSERT_TRUE(waitTuner(w, false));
+    w.refreshDevices();
+    v->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, true));
+    const int starts2 = ff.starts.load();
+    allowed = 3;
+    ASSERT_TRUE(pumpUntil([&] { return w.inputCombo()->itemData(0).toString().toStdString() == normal.inputs[0].name; }));
+    settle();
+    EXPECT_TRUE(w.errorBanner()->isHidden()) << w.errorBanner()->text().toStdString();
+    EXPECT_TRUE(v->isRunning());
+    EXPECT_EQ(ff.starts.load(), starts2);
+    EXPECT_EQ(w.inputCombo()->currentData().toString().toStdString(), in);
+    v->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, false));
+    EXPECT_EQ(ff.calls, 1);
+    EXPECT_EQ(listed.load(), 3);
+}
+
+// Restart storms: A4 and gain do not restart per keystroke, and a burst of quick changes
+// (spin arrows held, typing) restarts the tuner once, after the debounce.
+TEST(UiSmoke, TunerRestartDebounced) {
+    FakeFactory ff;
+    MainWindow w(ff.make(), fakeDevices);
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    TunerWidget* t = w.tunerView();
+    EXPECT_FALSE(t->a4Spin()->keyboardTracking());
+    EXPECT_FALSE(w.gainSpin()->keyboardTracking());
+    w.tabs()->setCurrentWidget(t);
+    ASSERT_TRUE(waitTuner(w, true));
+    const int starts = ff.starts.load();
+    for (int i = 1; i <= 10; ++i) {
+        if (i % 2)
+            w.gainSpin()->setValue(0.5 * i);
+        else
+            t->a4Spin()->setValue(440.0 + 0.5 * i);
+        // ~20 ms between changes (quicker than the debounce).
+        QElapsedTimer e;
+        e.start();
+        while (e.elapsed() < 20) QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    }
+    ASSERT_TRUE(pumpUntil([&] { return ff.starts.load() > starts && t->isRunning(); }));
+    // Generous quiet period: no further restart.
+    QElapsedTimer e;
+    e.start();
+    while (e.elapsed() < 800) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(2);
+    }
+    EXPECT_EQ(ff.starts.load(), starts + 1);
+    EXPECT_TRUE(t->isRunning());
+    EXPECT_TRUE(w.errorBanner()->isHidden());
+
+    // A pending restart is dropped when the tab is left; closing with one pending is clean.
+    w.gainSpin()->setValue(1.0);
+    w.tabs()->setCurrentWidget(w.tempoView());
+    ASSERT_TRUE(waitTuner(w, false));
+    const int after = ff.starts.load();
+    e.restart();
+    while (e.elapsed() < 600) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(2);
+    }
+    EXPECT_EQ(ff.starts.load(), after);
+    EXPECT_FALSE(t->isRunning());
+    w.tabs()->setCurrentWidget(t);
+    ASSERT_TRUE(waitTuner(w, true));
+    w.gainSpin()->setValue(2.0);
+    w.close();
+    e.restart();
+    while (e.elapsed() < 600) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+        QThread::msleep(2);
+    }
+    EXPECT_FALSE(t->isRunning());
 }
 
 #if defined(__SANITIZE_THREAD__)

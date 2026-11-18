@@ -49,7 +49,9 @@ DeviceLists listPipeWireDevices();
 //  - AFINADOR: the tuner session starts by itself when the tab becomes current and stops when
 //    the tab is left; its Parar/Iniciar pill pauses/resumes it (Parar holds until Iniciar or
 //    the tab is entered again). Instrument, tuning, A4, gain or device changes restart it
-//    (the DSP Tuner takes them at construction). Device combos and gain stay enabled while
+//    (the DSP Tuner takes them at construction), debounced by 250 ms (A4 and gain spin boxes
+//    without keyboard tracking) so a burst of changes restarts the streams once. A device scan
+//    refills the combos silently and restarts a running tuner only if the selection changed. Device combos and gain stay enabled while
 //    the tuner runs (changing them restarts it); a start failure disarms the tuner (banner,
 //    pill back to "Iniciar", no retry loop).
 //  - TREINO DE TEMPO: started/stopped by its own Iniciar/Parar; leaving the tab stops it.
@@ -132,6 +134,8 @@ private:
     std::string startErr_;
 
     QTimer pollTimer_, summaryTimer_, warningTimer_;
+    QTimer restartTimer_;  // debounces tuner restarts after config changes
+    static constexpr int kRestartDebounceMs = 250;
 
     QTabWidget* tabs_ = nullptr;
     TempoTrainingView* tempo_ = nullptr;

@@ -177,9 +177,9 @@ protected:
         const bool flat = voiced && r.cents < -TunerWidget::kGlowCents;
         const bool sharp = voiced && r.cents > TunerWidget::kGlowCents;
         p.setPen(flat ? (far ? flatFarPen_ : glyphLitPen_) : glyphPen_);
-        p.drawText(flatRect_, Qt::AlignCenter, QString::fromUtf8("♭"));
+        p.drawText(flatRect_, Qt::AlignCenter, flatText_);
         p.setPen(sharp ? (far ? sharpFarPen_ : glyphLitPen_) : glyphPen_);
-        p.drawText(sharpRect_, Qt::AlignCenter, QString::fromUtf8("♯"));
+        p.drawText(sharpRect_, Qt::AlignCenter, sharpText_);
 
         // Hub halo (behind needle and hub).
         if (glow) {
@@ -215,7 +215,7 @@ protected:
             p.drawText(noteRect_, Qt::AlignHCenter | Qt::AlignVCenter, t_->note_);
         } else {
             p.setPen(noteDimPen_);
-            p.drawText(noteRect_, Qt::AlignHCenter | Qt::AlignVCenter, QString::fromUtf8("—"));
+            p.drawText(noteRect_, Qt::AlignHCenter | Qt::AlignVCenter, dashText_);
         }
         p.setFont(readFont_);
         p.setPen(voiced ? readPen_ : noteDimPen_);
@@ -354,6 +354,8 @@ private:
         zeroLitPen_, labelPen_, zeroLabelPen_, glyphPen_, glyphLitPen_, flatFarPen_, sharpFarPen_, ledOffPen_, ledPen_, needlePen_, needleDimPen_, needleHaloPen_,
         hubPen_, hubLitPen_, notePen_, noteLitPen_, noteDimPen_, readPen_;
     QFont noteFont_, readFont_, tickFont_, glyphFont_;
+    const QString flatText_ = QString::fromUtf8("♭"), sharpText_ = QString::fromUtf8("♯"),
+                  dashText_ = QString::fromUtf8("—");
 };
 
 // ---------------------------------------------------------------- string strip
@@ -381,7 +383,7 @@ protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        const QStringList labels = t_->stringLabels();
+        const QStringList& labels = t_->labels_;  // cached per tuning change
         const int n = int(labels.size());
         if (n == 0) return;
         const double w = 84, h = 42, gap = 14;
@@ -478,6 +480,7 @@ TunerWidget::TunerWidget(QWidget* parent) : QWidget(parent) {
     root->addWidget(stripCard);
 
     rebuildTunings();
+    refreshViews();
 
     anim_.setInterval(16);  // <= 60 Hz, only while the pointer moves or the glow pulses
     connect(&anim_, &QTimer::timeout, this, [this] {
@@ -538,6 +541,8 @@ void TunerWidget::rebuildTunings() {
 }
 
 void TunerWidget::refreshViews() {
+    labels_.clear();
+    for (int m : tuning().strings) labels_ << QString::fromStdString(noteName(m));
     tuningCombo_->setToolTip(QString::fromUtf8("Afinação (cordas: %1)").arg(notesOf(tuning())));
     dial_->update();
     strip_->update();
@@ -550,7 +555,7 @@ double TunerWidget::smoothStep(double shown, double target, double dtSec) {
 
 void TunerWidget::setReading(const TunerReading& in) {
     TunerReading r = in;
-    const int strings = int(tuning().strings.size());
+    const int strings = int(labels_.size());
     if (!r.voiced || r.stringIndex < 0 || r.stringIndex >= strings || !std::isfinite(r.cents))
         r = TunerReading{false, -1, 0, 0, 0};
     reading_ = r;
@@ -626,9 +631,7 @@ void TunerWidget::updateTexts() {
     note_.clear();
     status_ = QString("Sem sinal");
     if (!reading_.voiced) return;
-    const Tuning t = tuning();
-    if (reading_.stringIndex >= 0 && reading_.stringIndex < int(t.strings.size()))
-        note_ = QString::fromStdString(noteName(t.strings[size_t(reading_.stringIndex)]));
+    if (reading_.stringIndex >= 0 && reading_.stringIndex < int(labels_.size())) note_ = labels_[reading_.stringIndex];
     const QLocale loc;  // pt-BR: "82,41 Hz  •  +0,4 cents"
     double c = std::round(reading_.cents * 10.0) / 10.0;
     if (c == 0.0) c = 0.0;  // no "-0,0"
@@ -641,8 +644,4 @@ int TunerWidget::highlightedString() const { return reading_.voiced ? reading_.s
 bool TunerWidget::glowActive() const { return reading_.voiced && std::fabs(reading_.cents) <= kGlowCents; }
 
 
-QStringList TunerWidget::stringLabels() const {
-    QStringList l;
-    for (int m : tuning().strings) l << QString::fromStdString(noteName(m));
-    return l;
-}
+QStringList TunerWidget::stringLabels() const { return labels_; }

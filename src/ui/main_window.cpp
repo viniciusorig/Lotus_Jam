@@ -94,7 +94,10 @@ protected:
     }
 };
 
+// Silent refill (no currentIndexChanged storm: clear() alone emits it with an empty combo);
+// the caller compares the selected node before/after.
 void fillCombo(QComboBox* c, const std::vector<AudioDevice>& devs, int fallback) {
+    const QSignalBlocker block(c);
     const QString prev = c->currentData().toString();
     c->clear();
     int widest = 0;
@@ -157,6 +160,8 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::shutdown() {
+    restartTimer_.stop();
+    tunerRestart_ = false;
     pollTimer_.stop();
     summaryTimer_.stop();
     if (listThread_.joinable()) listThread_.join();
@@ -299,9 +304,24 @@ void MainWindow::buildUi() {
     });
     connect(tuner_, &TunerWidget::configChanged, this, &MainWindow::onTunerConfigChanged);
     // The tuner keeps the device combos and the gain enabled: a change restarts it.
-    connect(inCombo_, &QComboBox::currentIndexChanged, this, &MainWindow::onTunerConfigChanged);
-    connect(outCombo_, &QComboBox::currentIndexChanged, this, &MainWindow::onTunerConfigChanged);
+    // (A scan refills the combos silently; onDevicesListed reports a changed selection once.)
+    connect(inCombo_, &QComboBox::currentIndexChanged, this, [this] {
+        if (!listing_) onTunerConfigChanged();
+    });
+    connect(outCombo_, &QComboBox::currentIndexChanged, this, [this] {
+        if (!listing_) onTunerConfigChanged();
+    });
     connect(gain_, &QDoubleSpinBox::valueChanged, this, &MainWindow::onTunerConfigChanged);
+    // Restart storms: no restart per keystroke, and a burst of changes restarts once.
+    gain_->setKeyboardTracking(false);
+    tuner_->a4Spin()->setKeyboardTracking(false);
+    restartTimer_.setSingleShot(true);
+    restartTimer_.setInterval(kRestartDebounceMs);
+    connect(&restartTimer_, &QTimer::timeout, this, [this] {
+        if (sessMode_ != Mode::Tuner || !(running_ || starting_)) return;
+        tunerRestart_ = true;
+        reconcile();
+    });
 }
 
 QStringList MainWindow::engineBadgeTexts() { return {"MOTOR PARADO", "INICIANDO", "MOTOR ATIVO", "FALHA"}; }
@@ -384,12 +404,17 @@ void MainWindow::onDevicesListed() {
     }
     listing_ = false;
     refresh_->setEnabled(!starting_ && !running_);
+    const QString prevIn = inCombo_->currentData().toString(), prevOut = outCombo_->currentData().toString();
     fillCombo(inCombo_, d.inputs, defaultInputIndex(d.inputs));
     fillCombo(outCombo_, d.outputs, defaultOutputIndex(d.outputs));
+    const bool selectionChanged =
+        inCombo_->currentData().toString() != prevIn || outCombo_->currentData().toString() != prevOut;
     syncTooltip(inCombo_, "Dispositivo de entrada (PipeWire)");
     syncTooltip(outCombo_, QString::fromUtf8("Dispositivo de saída (PipeWire)"));
+    const bool first = !devicesReady_;
     devicesReady_ = true;
     syncStartAllowed();
+    if (!first && selectionChanged) onTunerConfigChanged();  // a running tuner follows the new device
     reconcile();  // the tuner tab may be waiting for the first scan
 }
 
@@ -401,6 +426,12 @@ void MainWindow::syncStartAllowed() {
 }
 
 void MainWindow::onTabChanged() {
+    // A pending (debounced) tuner restart is applied now: reconcile() either stops the tuner
+    // (tab left) or restarts it with the current config (never left running on a stale one).
+    if (restartTimer_.isActive()) {
+        restartTimer_.stop();
+        tunerRestart_ = true;
+    }
     if (tabs_->currentWidget() == tuner_) tunerArmed_ = true;  // entering the tab (re)starts it
     reconcile();
 }
@@ -408,8 +439,7 @@ void MainWindow::onTabChanged() {
 void MainWindow::onTunerConfigChanged() {
     ++tunerGen_;  // readings of the old configuration are dropped from now on
     if (sessMode_ != Mode::Tuner || !(running_ || starting_)) return;  // applies at the next start
-    tunerRestart_ = true;
-    reconcile();
+    restartTimer_.start();  // debounced: a burst of changes restarts the stream once
 }
 
 void MainWindow::reconcile() {

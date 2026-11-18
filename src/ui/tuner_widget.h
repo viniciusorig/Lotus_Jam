@@ -95,6 +95,7 @@ private:
     double pulsePhase_ = 0.0;  // glow ring pulse, seconds
     int readings_ = 0;
     QString note_, status_{"Sem sinal"};
+    QStringList labels_;  // note names of the current tuning's strings (refreshViews)
     QTimer anim_;
     QElapsedTimer frame_;
 
