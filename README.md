@@ -102,7 +102,8 @@ voltar e você clicar em ↻, volta a ser o selecionado.
   recebe os eventos. Perdas de entrada (xruns) partem a linha do tempo em segmentos, sem
   deslocar as notas seguintes.
 - A janela abre o PipeWire, lista dispositivos e inicia sessões em threads auxiliares; a
-  thread da interface nunca faz DSP nem E/S bloqueante.
+  thread da interface nunca faz DSP nem E/S de áudio bloqueante (só grava as
+  configurações, alguns bytes, ao iniciar, ao fechar e com atraso de 1 s).
 
 ## Limitações conhecidas
 
@@ -135,7 +136,7 @@ INI temporários; os testes do backend PipeWire criam só um null sink privado e
 `ctest --test-dir build -E PipeWire`. Com ThreadSanitizer:
 
 ```sh
-cmake -S . -B build-tsan -G Ninja -DTREINO_TSAN=ON
+cmake -S . -B build-tsan -G Ninja -DTREINO_TSAN=ON -DCMAKE_BUILD_TYPE=Debug
 cmake --build build-tsan
 ctest --test-dir build-tsan
 ```

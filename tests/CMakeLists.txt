@@ -5,6 +5,7 @@ list(FILTER TREINO_TEST_SOURCES EXCLUDE REGEX "/(ui_[^/]*|settings)_test\\.cpp$"
 
 add_executable(treino_tests ${TREINO_TEST_SOURCES})
 target_link_libraries(treino_tests PRIVATE treino_core GTest::gtest_main)
+target_compile_definitions(treino_tests PRIVATE $<$<CONFIG:Debug>:TREINO_DEBUG_BUILD>)
 
 include(GoogleTest)
 gtest_discover_tests(treino_tests DISCOVERY_MODE PRE_TEST)
