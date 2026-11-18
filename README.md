@@ -116,10 +116,10 @@ A validação com o baixo real na PCM2902 **ainda não foi feita** (veja
   cego de até ~10 s; ronco de rede ou ventilador que sobe durante o jogo pode gerar ataques
   falsos; uma sessão que começa no meio de um jogo contínuo, sem silêncio, perde a referência do
   piso (por isso a contagem).
-- Afinador: uma nota a mais de 100 cents de **todas** as cordas aparece como “Sem sinal” (é o
-  que separa o ronco de 60 Hz de um Lá1); uma corda desafinada mais de um semitom também. A
-  tolerância de oitava é fixa; uma fundamental muito fraca em relação ao 2º harmônico ainda pode
-  ser lida uma oitava acima.
+- Afinador: sinal com RMS abaixo de −38 dBFS (silêncio, ruído, ronco) aparece como “Sem sinal”;
+  uma corda bem desafinada é mostrada com a nota mais próxima e o desvio em cents. A tolerância
+  de oitava é fixa; uma fundamental muito fraca em relação ao 2º harmônico ainda pode ser lida
+  uma oitava acima.
 - O viés absoluto do carimbo de tempo do PipeWire em hardware real (até 1–2 quanta) não foi
   medido; é constante e é absorvido pela compensação.
 

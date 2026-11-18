@@ -761,10 +761,10 @@ TEST(UiSmoke, TunerNoSignalMessage) {
         EXPECT_DOUBLE_EQ(t->centsShown(), 0.0);
         EXPECT_TRUE(w.grab().save(UI_TUNER_NOSIGNAL_PNG));
     }
-    // 2. baixo4: an in-tune E1, then 60 Hz hum (150 cents from A1) and 440 Hz (out of range).
+    // 2. baixo4: an in-tune E1, then quiet 60 Hz hum (below the level gate) and 440 Hz (out of range).
     {
         FakeFactory ff;
-        ff.tones = {{0.1, 1.5, hzOf(28, 0.0), 0.3}, {2.0, 4.0, 60.0, 0.3}, {4.5, 6.5, 440.0, 0.3}};
+        ff.tones = {{0.1, 1.5, hzOf(28, 0.0), 0.3}, {2.0, 4.0, 60.0, 0.004}, {4.5, 6.5, 440.0, 0.3}};
         ff.pauseAtOffset = 6.6;
         MainWindow w(ff.make(), fakeDevices);
         w.show();

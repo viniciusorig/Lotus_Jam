@@ -49,8 +49,8 @@ Ruling R3: esta parte não pode ser automatizada (exige o baixo e a PCM2902 cone
    nota e a oitava estão certas (principalmente E1 ≈ 41,2 Hz, sem saltar para E2)? O ponteiro
    fica estável (quantos cents oscila)? Responde em < 100 ms ao tocar? — resultado: _____
 6. **“Sem sinal”.** Com o baixo abafado (só o ronco de 60 Hz/harmônicos) aparece “Sem sinal” ou
-   uma nota falsa (A1 +150 cents)? Uma corda desafinada > 1 semitom aparece como “Sem sinal”
-   (regra R7)? — resultado: _____
+   uma nota falsa? Uma corda bem desafinada aparece com a nota mais próxima e o desvio em cents
+   (ex.: Ré a −170 cents), sem “Sem sinal”? — resultado: _____
 7. **Amostra.** Em TREINO DE TEMPO, clicar “Gravar amostra” e tocar por 10 s; guardar o WAV
    (`~/.local/share/lotus-jam/amostras/`) para testes de regressão (detector e afinador com
    sinal real). Arquivo: _____
@@ -60,12 +60,12 @@ Ruling R3: esta parte não pode ser automatizada (exige o baixo e a PCM2902 cone
 
 ### Pontos a revisitar com o resultado da validação
 
-- **R7 (afinador):** a regra “mais de 100 cents de todas as cordas = Sem sinal” separa o ronco de
-  60 Hz (lido como A1 +150,6 cents) de uma nota, mas faz uma corda desafinada > 1 semitom
-  aparecer como “Sem sinal”. Revisitar com o baixo real: possível gate de amplitude + rejeição de
-  50/60 Hz em vez da regra de cents. Também: harmônicos do ronco (120/180 Hz) caem na janela de
-  captura em “Meio-tom abaixo” (baixo6 B2 ≈ 123,5 Hz, violão F#3 ≈ 185 Hz); tolerância de oitava
-  fixa (0,03): fundamental < ~0,1 do 2º harmônico ainda é lida uma oitava acima.
+- **Afinador (corrigido após o primeiro teste real):** a regra de 100 cents foi trocada por um
+  gate de nível (RMS < −38 dBFS = “Sem sinal”: silêncio, ruído, ronco) e uma corda frouxa passa a
+  ser mostrada com seu desvio. A primeira leitura depois de um silêncio é confirmada pela
+  seguinte, e janelas de ataque (palhetada começando dentro da janela) são ignoradas. A
+  tolerância de oitava é fixa (0,03): fundamental < ~0,1 do 2º harmônico ainda pode ser lida uma
+  oitava acima. Se o ronco ficar acima de −38 dBFS (ganho alto), o gate acompanha o ganho.
 - **R13 (detector de ataques, limites em `src/dsp/onset.h`):** re-toques sobre a cauda sem subida
   > 6 dB não são detectados (e os detectados chegam 2–4 ms atrasados); notas < ~14 dB acima do
   piso não são detectadas; após queda de ~20 dB no volume há ponto cego de até ~10 s; ventilador

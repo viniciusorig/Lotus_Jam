@@ -107,7 +107,8 @@ bool Session::start(const SessionConfig& cfg, std::string& err) {
         backend_->setRenderer([cs](float* out, size_t frames, int64_t first) { cs->render(out, frames, first); });
     } else {
         // A4/instrument/tuning are fixed at Tuner construction: changing them needs a restart.
-        tuner_ = std::make_unique<::Tuner>(kSampleRate, *cfg.instrument, cfg.tuning, cfg.a4);
+        tuner_ = std::make_unique<::Tuner>(kSampleRate, *cfg.instrument, cfg.tuning, cfg.a4,
+                                             ::Tuner::kDefaultMinRms * gain_);
         backend_->setRenderer([](float* out, size_t frames, int64_t) { std::fill(out, out + 2 * frames, 0.0f); });
     }
     {

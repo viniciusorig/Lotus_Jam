@@ -111,11 +111,44 @@ TEST(Tuner, UnvoicedAndOutOfRange) {
     for (const auto& r : rs) EXPECT_FALSE(r.voiced) << "440 Hz on bass: " << r.hz;
   }
   {
+    // Quiet mains hum (60 Hz + 2nd harmonic at about -50 dBFS, like the PCM2902 in silence).
     Tuner tuner(kSr, b, b.tunings[0], 440.0);
-    auto rs = run(tuner, tone(60.0, 0.5, true));
+    std::vector<float> hum = tone(60.0, 0.5, false);
+    for (float& v : hum) v *= 0.012f;
+    auto rs = run(tuner, hum);
     ASSERT_FALSE(rs.empty());
-    for (const auto& r : rs)
-      EXPECT_TRUE(!r.voiced || (r.stringIndex == 0 && std::fabs(r.cents) < 50.0))
-          << "60 Hz hum: " << r.hz << " Hz string " << r.stringIndex << " " << r.cents;
+    for (const auto& r : rs) EXPECT_FALSE(r.voiced) << "quiet hum: " << r.hz;
   }
+}
+
+// A slack string must be reported against the nearest string (the player needs the cents to
+// tune it up), not rejected. Recorded case: the D string of a bass sounding at about 66 Hz.
+TEST(Tuner, SlackStringIsReportedWithLargeCents) {
+  const Instrument& b = inst("baixo4");
+  Tuner tuner(kSr, b, b.tunings[0], 440.0);
+  auto rs = run(tuner, tone(66.0, 1.0));
+  ASSERT_FALSE(rs.empty());
+  const TunerReading& r = rs.back();
+  ASSERT_TRUE(r.voiced);
+  EXPECT_EQ(r.stringIndex, 2);  // D2
+  EXPECT_NEAR(r.cents, 1200.0 * std::log2(66.0 / midiToHz(38)), 3.0);
+  EXPECT_LT(r.cents, -150.0);
+}
+
+// A pluck that starts inside the analysis window must not produce a wild first reading.
+TEST(Tuner, PluckOnsetNeverGivesWildReadings) {
+  const Instrument& b = inst("baixo4");
+  Tuner tuner(kSr, b, b.tunings[0], 440.0);
+  std::vector<float> x(size_t(0.25 * kSr), 0.0f);
+  std::vector<float> note = tone(midiToHz(33), 1.0);  // A1
+  x.insert(x.end(), note.begin(), note.end());
+  auto rs = run(tuner, x);
+  int voiced = 0;
+  for (const auto& r : rs)
+    if (r.voiced) {
+      ++voiced;
+      EXPECT_EQ(r.stringIndex, 1);
+      EXPECT_LT(std::fabs(r.cents), 20.0) << r.hz;
+    }
+  EXPECT_GT(voiced, 5);
 }
