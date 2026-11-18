@@ -312,6 +312,7 @@ void MainWindow::buildUi() {
     connect(tempo_, &TempoTrainingView::startRequested, this, [this] { startSession(Mode::Training); });
     connect(tempo_, &TempoTrainingView::stopRequested, this, &MainWindow::stopSession);
     connect(tempo_, &TempoTrainingView::recordRequested, this, &MainWindow::recordSample);
+    connect(tempo_, &TempoTrainingView::calibrateRequested, this, &MainWindow::calibrate);
 
     connect(tabs_, &QTabWidget::currentChanged, this, &MainWindow::onTabChanged);
     connect(tuner_, &TunerWidget::startRequested, this, [this] {
@@ -538,6 +539,13 @@ void MainWindow::startSession(Mode mode) {
     SessionConfig cfg;
     cfg.mode = mode;
     cfg.compensationMs = comp_->value();
+    if (!tuner) {
+        sessComp_ = cfg.compensationMs;
+        stepMs_ = 60000.0 / tempo_->bpm() / tempo_->subdivision();
+        offsets_.clear();
+        tempo_->setCalibrationAvailable(false);
+        tempo_->setCalibrationMessage({});
+    }
     cfg.gainDb = gain_->value();
     if (tuner) {
         // Fixed for the session (the DSP Tuner has no setter): configChanged restarts it.
@@ -663,6 +671,44 @@ void MainWindow::poll() {
     }
 }
 
+void MainWindow::addOffset(double ms) {
+    if (!std::isfinite(ms)) return;
+    offsets_.push_back(ms);
+    if (offsets_.size() == 8) tempo_->setCalibrationAvailable(true);
+}
+
+// Circular mean of the offsets over one beat step: it still finds the delay when it is larger
+// than the scoring window (notes then show up as extras, which the plain mean of hits misses).
+void MainWindow::calibrate() {
+    const size_t n = offsets_.size();
+    if (n < 8 || stepMs_ <= 0.0) {
+        tempo_->setCalibrationMessage(QString::fromUtf8("Toque pelo menos 8 notas junto ao clique antes de calibrar."));
+        return;
+    }
+    const double twoPi = 6.283185307179586;
+    double c = 0.0, s = 0.0;
+    for (double e : offsets_) {
+        c += std::cos(twoPi * e / stepMs_);
+        s += std::sin(twoPi * e / stepMs_);
+    }
+    c /= double(n);
+    s /= double(n);
+    const double r = std::hypot(c, s);
+    if (r < 0.5) {
+        tempo_->setCalibrationMessage(QString::fromUtf8(
+            "As notas não seguem o clique (concentração %1%). Toque notas regulares, uma por batida, e tente de novo.")
+                                          .arg(int(r * 100)));
+        return;
+    }
+    const double bias = std::atan2(s, c) * stepMs_ / twoPi;
+    const double now = std::clamp(sessComp_ + bias, comp_->minimum(), comp_->maximum());
+    comp_->setValue(now);
+    tempo_->setCalibrationMessage(QString::fromUtf8("Compensação ajustada para %1 ms (%2 notas, concentração %3%). Inicie de novo para testar.")
+                                      .arg(now, 0, 'f', 1)
+                                      .arg(n)
+                                      .arg(int(r * 100)));
+}
+
 void MainWindow::dispatchEvents(const std::vector<UiEvent>& events) {
     double peak = -1.0;
     bool stopped = false;
@@ -675,11 +721,13 @@ void MainWindow::dispatchEvents(const std::vector<UiEvent>& events) {
         }
         case UiEvent::Note:
             tempo_->timeline()->addNote(e.n, e.a);
+            addOffset(e.a);
             break;
         case UiEvent::Miss:
             tempo_->timeline()->addMiss(e.n);
             break;
-        case UiEvent::Extra:  // counted in the summary
+        case UiEvent::Extra:  // counted in the summary; still useful to calibrate the latency
+            addOffset(e.a);
             break;
         case UiEvent::Tuner:  // only readings of the tuner's current configuration
             if (sessMode_ == Mode::Tuner && running_ && sessTunerGen_ == tunerGen_) tuner_->setReading(e.tuner);

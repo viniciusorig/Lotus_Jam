@@ -304,6 +304,36 @@ TEST(UiSmoke, TrainingSessionWithFakeBackend) {
     EXPECT_TRUE(shot.save(UI_SMOKE_PNG));
 }
 
+// The delay of the audio path (HDMI) can be larger than the scoring window: the notes then
+// show up as extras and the plain mean error of the hits says nothing. Calibrar uses every
+// note (circular mean over one beat step) and still finds the offset.
+TEST(UiSmoke, CalibrateFindsDelayBeyondTheScoringWindow) {
+    FakeFactory ff;
+    ff.notes = 16;
+    ff.offsetMs = 260;  // 120 BPM: step 500 ms, window 200 ms: every note is an extra (-240 ms)
+    ff.pauseAfterLastSec = 0.6;
+    MainWindow w(ff.make(), fakeDevices);
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    TempoTrainingView* v = w.tempoView();
+    v->bpmSpin()->setValue(120);
+    EXPECT_FALSE(v->calibrateButton()->isEnabled());
+    const double before = w.compensationSpin()->value();
+
+    v->startButton()->click();
+    ASSERT_TRUE(waitRunning(w, true));
+    ASSERT_TRUE(pumpUntil([&] { return v->calibrateButton()->isEnabled(); }));
+    ASSERT_TRUE(pumpUntil([&] { return ff.last->nowSec() >= ff.pauseAt; }));
+    v->startButton()->click();  // Parar
+    ASSERT_TRUE(waitRunning(w, false));
+    EXPECT_EQ(v->summaryCard()->shown().hits, 0);
+
+    v->calibrateButton()->click();
+    EXPECT_NEAR(w.compensationSpin()->value(), before - 240.0, 4.0);
+    EXPECT_FALSE(v->calibrationLabel()->isHidden());
+    EXPECT_TRUE(v->calibrationLabel()->text().contains("Compensação ajustada"));
+}
+
 TEST(UiSmoke, ErrorShownOnBackendFailure) {
     FakeFactory ff;
     MainWindow w(ff.make(), fakeDevices);

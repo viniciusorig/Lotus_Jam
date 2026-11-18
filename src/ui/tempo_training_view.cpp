@@ -78,6 +78,20 @@ TempoTrainingView::TempoTrainingView(QWidget* parent) : QWidget(parent) {
 
     ch->addStretch(1);
 
+    calibLabel_ = new QLabel(controls);
+    calibLabel_->setObjectName("RecIndicator");
+    calibLabel_->setWordWrap(true);
+    calibLabel_->setMaximumWidth(360);
+    calibLabel_->hide();
+    ch->addWidget(calibLabel_, 0, Qt::AlignBottom);
+
+    calibrate_ = new QPushButton("Calibrar", controls);
+    calibrate_->setEnabled(false);
+    calibrate_->setToolTip(QString::fromUtf8(
+        "Ajusta a Compensação pela média de TODAS as notas que você tocou (inclusive as fora da janela). "
+        "Toque pelo menos 8 notas junto ao clique, pare e clique aqui; vale a partir do próximo início."));
+    ch->addWidget(calibrate_, 0, Qt::AlignBottom);
+
     recLabel_ = new QLabel(controls);
     recLabel_->setObjectName("RecIndicator");
     recLabel_->hide();
@@ -129,6 +143,7 @@ TempoTrainingView::TempoTrainingView(QWidget* parent) : QWidget(parent) {
             Q_EMIT startRequested();
     });
     connect(record_, &QPushButton::clicked, this, &TempoTrainingView::recordRequested);
+    connect(calibrate_, &QPushButton::clicked, this, &TempoTrainingView::calibrateRequested);
 }
 
 int TempoTrainingView::bpm() const { return bpm_->value(); }
@@ -199,4 +214,11 @@ void TempoTrainingView::setRecordingState(Rec state, const QString& path) {
         restyle(recLabel_);
     }
     record_->setEnabled(running_ && state != Rec::Recording);
+}
+
+void TempoTrainingView::setCalibrationAvailable(bool available) { calibrate_->setEnabled(available); }
+
+void TempoTrainingView::setCalibrationMessage(const QString& text) {
+    calibLabel_->setText(text);
+    calibLabel_->setVisible(!text.isEmpty());
 }

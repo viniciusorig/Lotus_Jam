@@ -179,6 +179,12 @@ private:
     static constexpr double kRecGraceSec = 1.5;
     bool userStop_ = false;  // the current session's end was asked for by Parar
     bool recPending_ = false, recError_ = false;
+    // Calibration: errors (ms, relative to the nearest beat slot) of every note heard in the
+    // last training session, hits and extras alike, and the compensation/step they were taken with.
+    std::vector<double> offsets_;
+    double sessComp_ = 0.0, stepMs_ = 0.0;
+    void calibrate();
+    void addOffset(double ms);
     double recDeadline_ = 0;  // backend clock
     QString recPath_;
 };

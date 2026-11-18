@@ -37,6 +37,11 @@ public:
 
     QPushButton* startButton() const { return start_; }
     QPushButton* recordButton() const { return record_; }
+    QPushButton* calibrateButton() const { return calibrate_; }
+    // Calibrar: enabled once enough notes were heard; the message explains the last result.
+    void setCalibrationAvailable(bool available);
+    void setCalibrationMessage(const QString& text);
+    QLabel* calibrationLabel() const { return calibLabel_; }
     QSpinBox* bpmSpin() const { return bpm_; }
     QComboBox* countInCombo() const { return countIn_; }
     QComboBox* subdivisionCombo() const { return subdivision_; }
@@ -49,6 +54,7 @@ Q_SIGNALS:
     void startRequested();
     void stopRequested();
     void recordRequested();
+    void calibrateRequested();
 
 private:
     void restyle(QWidget* w);
@@ -60,6 +66,8 @@ private:
     QPushButton* start_ = nullptr;
     QPushButton* record_ = nullptr;
     QLabel* recLabel_ = nullptr;
+    QPushButton* calibrate_ = nullptr;
+    QLabel* calibLabel_ = nullptr;
     bool startAllowed_ = false;
     Rec rec_ = Rec::None;
     PulseWidget* pulse_ = nullptr;

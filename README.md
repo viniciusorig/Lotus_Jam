@@ -66,7 +66,10 @@ Como calibrar com o baixo de verdade:
 
 1. Escolha a entrada e a saída que você vai usar e deixe a compensação em 0 ms.
 2. Em TREINO DE TEMPO, toque junto com o clique por uns 30 s, com o máximo de cuidado.
-3. Leia a **média do erro** no cartão de resumo. Se ela der, por exemplo, +18 ms (você
+3. Pare e clique em **Calibrar**: ele usa **todas** as notas que você tocou (inclusive as que caíram
+   fora da janela de 200 ms, que aparecem como “extras”) e ajusta a Compensação sozinho. Isso
+   funciona mesmo quando o atraso do áudio (por exemplo, o do monitor HDMI) é maior que a janela.
+   Se preferir ajustar à mão, leia a **média do erro** no cartão de resumo. Se ela der, por exemplo, +18 ms (você
    “atrasou” mesmo tocando certo), coloque **+18** em Compensação; se der −7 ms, coloque −7.
    (Se já havia uma compensação, some a média a ela.)
 4. Inicie de novo e confira que a média fica perto de 0.
