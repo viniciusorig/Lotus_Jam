@@ -565,6 +565,7 @@ void MainWindow::startSession(Mode mode) {
         cfg.instrument = &tuner_->instrument();
         cfg.a4 = tuner_->a4();
         cfg.speedFactor = music_->speedFactor();
+        cfg.songBpm = music_->song().tempoBpm > 0 ? music_->song().tempoBpm : 120.0;
         const int track = music_->selectedTrack();
         if (track >= 0 && track < static_cast<int>(music_->song().tracks.size())) {
             cfg.songNotes = music_->song().tracks[static_cast<size_t>(track)].notes;

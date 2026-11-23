@@ -35,6 +35,7 @@ struct SessionConfig {
     // Music mode
     std::vector<MidiNote> songNotes;  // notes to practice (from selected MIDI track)
     double speedFactor = 1.0;         // 0.5 = 50% speed, 1.0 = normal
+    double songBpm = 120;             // MIDI tempo (clicks play at this rate / speed)
 };
 
 // Event for the UI thread.

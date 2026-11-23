@@ -135,8 +135,11 @@ bool Session::start(const SessionConfig& cfg, std::string& err) {
         Tuning chromatic{"Cromático", {}};
         tuner_ = std::make_unique<::Tuner>(kSampleRate, *cfg.instrument, chromatic, cfg.a4,
                                              ::Tuner::kDefaultMinRms * gain_);
-        // NoteScorer is created when the song actually starts (we need songStartSec_).
-        backend_->setRenderer([](float* out, size_t frames, int64_t) { std::fill(out, out + 2 * frames, 0.0f); });
+        // Click at song tempo adjusted by speed factor (no count-in).
+        const double effectiveBpm = cfg.songBpm * cfg.speedFactor;
+        clicks_ = std::make_unique<ClickScheduler>(kSampleRate, effectiveBpm, 0);
+        ClickScheduler* cs = clicks_.get();
+        backend_->setRenderer([cs](float* out, size_t frames, int64_t first) { cs->render(out, frames, first); });
     }
     {
         std::lock_guard<std::mutex> lk(summaryMutex_);
