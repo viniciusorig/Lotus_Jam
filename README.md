@@ -14,19 +14,6 @@
 - 🎤 **Transcrição** — grave sua performance e gere um arquivo MIDI automaticamente
 - 🎼 **Afinador cromático** — afine seu instrumento com precisão de ±1 cent
 
-## Screenshots
-
-<p align="center">
-  <img src="docs/screenshots/tuner.png" alt="Afinador" width="400">
-  <img src="docs/screenshots/tempo.png" alt="Treino de Tempo" width="400">
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/music.png" alt="Músicas & MIDI" width="400">
-</p>
-
-> **Nota:** Se as imagens não aparecerem, rode o app e tire screenshots com `scrot -u` ou similar, salvando em `docs/screenshots/`.
-
 ## Compilar
 
 **Dependências:** CMake ≥ 3.20, Ninja, compilador C++20, Qt 6 (Widgets, Svg), PipeWire e GoogleTest.
