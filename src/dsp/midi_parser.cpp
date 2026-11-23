@@ -1,270 +1,141 @@
 #include "midi_parser.h"
-#include <fstream>
-#include <sstream>
 #include <algorithm>
-#include <cmath>
-#include <optional>
-#include <stack>
-#include <unordered_map>
+#include <fstream>
+#include <iterator>
+#include <map>
 
-// --- SMF (Standard MIDI File) chunk helpers ---
+namespace {
 
-// Read exactly `n` bytes from stream, returning false on error.
-static bool readExact(std::istream& stream, std::vector<uint8_t>& buf, size_t n) {
-    buf.resize(n);
-    stream.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(n));
-    return stream.gcount() == static_cast<std::streamsize>(n);
+uint32_t be(const std::vector<uint8_t>& d, size_t p, int n) {
+    uint32_t v = 0;
+    for (int i = 0; i < n; ++i) v = (v << 8) | d[p + i];
+    return v;
 }
 
-// Read a big-endian 16-bit unsigned integer.
-static uint16_t readU16(const uint8_t* data) {
-    return (static_cast<uint16_t>(data[0]) << 8) | static_cast<uint16_t>(data[1]);
-}
-
-// Read a big-endian 32-bit unsigned integer.
-static uint32_t readU32(const uint8_t* data) {
-    return (static_cast<uint32_t>(data[0]) << 24) |
-           (static_cast<uint32_t>(data[1]) << 16) |
-           (static_cast<uint32_t>(data[2]) << 8)  |
-           static_cast<uint32_t>(data[3]);
-}
-
-// Decode a variable-length quantity (SMF delta time encoding).
-// Returns the decoded value and advances `pos` past the VLQ bytes.
-static size_t decodeVLQ(const uint8_t* data, size_t pos, size_t end, int64_t& value) {
-    value = 0;
-    size_t shift = 0;
-    while (pos < end) {
-        uint8_t b = data[pos++];
-        value |= (static_cast<int64_t>(b & 0x7f) << shift);
-        if ((b & 0x80) == 0) break;
-        shift += 7;
+// Reads a variable-length quantity; returns false if the data runs out.
+bool vlq(const std::vector<uint8_t>& d, size_t& p, size_t end, uint32_t& v) {
+    v = 0;
+    for (int i = 0; i < 4 && p < end; ++i) {
+        uint8_t b = d[p++];
+        v = (v << 7) | (b & 0x7f);
+        if (!(b & 0x80)) return true;
     }
-    return pos;
+    return false;
 }
 
-// --- SMF 0/1 parser ---
+struct RawNote { uint64_t on, off; int midi; };
+
+}  // namespace
 
 MidiSong parseMidiFile(const std::string& filePath) {
     MidiSong song;
     song.tempoBpm = 120.0;
-    song.division = 480;  // default: ticks per quarter note
+    song.division = 480;
 
-    std::ifstream file(filePath, std::ios::binary);
-    if (!file.is_open()) {
-        return song;  // empty
-    }
+    std::ifstream f(filePath, std::ios::binary);
+    std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (d.size() < 14 || !std::equal(d.begin(), d.begin() + 4, "MThd") || be(d, 4, 4) < 6) return song;
 
-    // --- Read header chunk ---
+    const uint16_t numTracks = be(d, 10, 2);
+    const uint16_t div = be(d, 12, 2);
+    if (div & 0x8000) return song;  // shortcut: SMPTE time division unsupported, add if needed
+    song.division = div ? div : 480;
 
-    // Must start with "MThd" (4 bytes)
-    char magic[4];
-    std::vector<uint8_t> magicVec(magic, magic + 4);
-    if (!readExact(file, magicVec, 4)) return song;
-    if (std::string(reinterpret_cast<const char*>(magicVec.data()), 4) != "MThd") return song;
+    std::map<uint64_t, uint32_t> tempos;  // tick -> µs per quarter (all tracks share one tempo map)
+    std::vector<std::pair<std::string, std::vector<RawNote>>> raw;
 
-    // Header size (always 6 for standard format)
-    uint32_t headerSize;
-    std::vector<uint8_t> headerSizeVec(reinterpret_cast<uint8_t*>(&headerSize), reinterpret_cast<uint8_t*>(&headerSize) + 4);
-    if (!readExact(file, headerSizeVec, 4)) return song;
-    headerSize = readU32(reinterpret_cast<const uint8_t*>(&headerSize));  // big-endian to host
+    size_t pos = 8 + be(d, 4, 4);
+    while (raw.size() < numTracks && pos + 8 <= d.size()) {
+        const size_t len = be(d, pos + 4, 4);
+        const bool isTrk = std::equal(d.begin() + pos, d.begin() + pos + 4, "MTrk");
+        const size_t start = pos + 8;
+        const size_t end = std::min(d.size(), start + len);
+        pos = start + len;
+        if (!isTrk) continue;
 
-    if (headerSize != 6) return song;  // only support standard format
+        std::string name;
+        std::vector<RawNote> notes;
+        std::map<int, uint64_t> pending;  // key = channel<<8 | note
+        uint64_t tick = 0;
+        uint8_t running = 0;
+        size_t p = start;
+        uint32_t delta;
 
-    // Format type: 0 or 1
-    uint16_t format;
-    std::vector<uint8_t> formatVec(reinterpret_cast<uint8_t*>(&format), reinterpret_cast<uint8_t*>(&format) + 2);
-    if (!readExact(file, formatVec, 2)) return song;
-    format = readU16(reinterpret_cast<const uint8_t*>(&format));
+        while (vlq(d, p, end, delta) && p < end) {
+            tick += delta;
+            uint8_t st = d[p];
+            if (st >= 0x80) { ++p; if (st < 0xF0) running = st; } else st = running;
+            if (st < 0x80) break;  // data byte with no running status: corrupt
 
-    // Number of tracks
-    uint16_t numTracks;
-    std::vector<uint8_t> numTracksVec(reinterpret_cast<uint8_t*>(&numTracks), reinterpret_cast<uint8_t*>(&numTracks) + 2);
-    if (!readExact(file, numTracksVec, 2)) return song;
-    numTracks = readU16(reinterpret_cast<const uint8_t*>(&numTracks));
-
-    // Division (ticks per quarter note for SMF 0; for SMF 1 it's also ticks per quarter)
-    int16_t divisionRaw;
-    std::vector<uint8_t> divisionRawVec(reinterpret_cast<uint8_t*>(&divisionRaw), reinterpret_cast<uint8_t*>(&divisionRaw) + 2);
-    if (!readExact(file, divisionRawVec, 2)) return song;
-    divisionRaw = readU16(reinterpret_cast<const uint8_t*>(&divisionRaw));
-    if (divisionRaw > 0) {
-        song.division = divisionRaw;  // positive = pulses per quarter note
-    } else {
-        song.division = -divisionRaw;  // negative = frames per second (MIDI Film)
-    }
-
-    // --- Read track chunks ---
-
-    song.tracks.resize(numTracks);
-
-    for (uint16_t t = 0; t < numTracks; ++t) {
-        // Read "MTrk" magic
-        char trkMagic[4];
-        std::vector<uint8_t> trkMagicVec(trkMagic, trkMagic + 4);
-        if (!readExact(file, trkMagicVec, 4)) break;
-        if (std::string(reinterpret_cast<const char*>(trkMagicVec.data()), 4) != "MTrk") continue;
-
-        // Track size
-        uint32_t trackSize;
-        std::vector<uint8_t> trackSizeVec(reinterpret_cast<uint8_t*>(&trackSize), reinterpret_cast<uint8_t*>(&trackSize) + 4);
-        if (!readExact(file, trackSizeVec, 4)) break;
-        trackSize = readU32(reinterpret_cast<const uint8_t*>(&trackSize));
-
-        // Read track events with note-on/off tracking
-        std::vector<MidiNote> notes;
-        int64_t deltaTime = 0;
-        int64_t absoluteTimeTicks = 0;  // absolute ticks from song start
-        double ticksPerQuarter = song.division;
-
-        // For tempo tracking
-        double currentTempoBpm = 120.0;
-
-        // Pending note-ons: note -> (start_ticks, channel)
-        // Using unordered_map for note -> start_ticks mapping
-        std::unordered_map<int, int64_t> pendingNotes;  // note -> start absolute tick
-
-        const uint8_t* trackData = nullptr;
-        {
-            std::vector<uint8_t> buf(trackSize);
-            if (!readExact(file, buf, trackSize)) break;
-            trackData = buf.data();
-        }
-
-        size_t pos = 0;
-        size_t end = trackSize;
-
-        while (pos < end) {
-            // Decode delta time
-            int64_t dv = 0;
-            pos = decodeVLQ(trackData, pos, end, dv);
-            deltaTime = dv;
-
-            // Absolute time in ticks from song start
-            absoluteTimeTicks += deltaTime;
-
-            // Event type: first byte (must have high bit set for a valid MIDI event)
-            uint8_t status = trackData[pos];
-            pos++;
-
-            if (status < 0x80) {
-                // Invalid or running-status byte without preceding status – skip it
-                continue;
-            }
-
-            // Process note-on and note-off events
-            if ((status & 0xF0) == 0x90) {  // Note On
-                // velocity byte
-                if (pos >= end) break;
-                uint8_t velocity = trackData[pos];
-                pos++;
-
-                // Note number byte
-                if (pos >= end) break;
-                uint8_t note = trackData[pos];
-                pos++;
-
-                if (velocity > 0) {
-                    // Note on with velocity > 0 - note starts now
-                    // Store start absolute tick for this note
-                    pendingNotes[note] = absoluteTimeTicks;
-                } else {
-                    // Note on with velocity 0 = note off
-                    // Finalize the note
-                    auto it = pendingNotes.find(note);
-                    if (it != pendingNotes.end()) {
-                        int64_t startTick = it->second;
-                        int64_t durationTicks = absoluteTimeTicks - startTick;
-                        // Convert ticks to seconds: (ticks * 60) / (tempo * division)
-                        double durationSec = (durationTicks * 60.0) / (currentTempoBpm * ticksPerQuarter);
-                        // Also compute start time from start tick
-                        double startSec = (startTick * 60.0) / (currentTempoBpm * ticksPerQuarter);
-                        notes.push_back({startSec, durationSec, (int)note, -1});
-                        pendingNotes.erase(it);
-                    }
-                }
-            } else if ((status & 0xF0) == 0x80) {  // Note Off
-                if (pos >= end) break;
-                pos++;  // velocity byte (unused)
-
-                if (pos >= end) break;
-                uint8_t note = trackData[pos];
-                pos++;
-
-                // Note off - find matching note-on and finalize
-                auto it = pendingNotes.find(note);
-                if (it != pendingNotes.end()) {
-                    int64_t startTick = it->second;
-                    int64_t durationTicks = absoluteTimeTicks - startTick;
-                    // Convert ticks to seconds: (ticks * 60) / (tempo * division)
-                    double durationSec = (durationTicks * 60.0) / (currentTempoBpm * ticksPerQuarter);
-                    // Also compute start time from start tick
-                    double startSec = (startTick * 60.0) / (currentTempoBpm * ticksPerQuarter);
-                    notes.push_back({startSec, durationSec, (int)note, -1});
-                    pendingNotes.erase(it);
-                }
-            }
-            // Pitch wheel, control change, etc - skip
-            else if ((status & 0xF0) == 0xE0) {  // Pitch Wheel Change
-                if (pos >= end) break;
-                pos++;  // LSB
-                if (pos >= end) break;
-                pos++;  // MSB
-            } else if ((status & 0xF0) == 0xB0) {  // Control Change
-                if (pos >= end) break;
-                pos++;  // controller number
-                if (pos >= end) break;
-                pos++;  // value
-            } else if ((status & 0xF0) == 0xC0) {  // Program Change
-                if (pos >= end) break;
-                pos++;  // program number
-            } else if ((status & 0xF0) == 0xD0) {  // Channel Aftertouch
-                if (pos >= end) break;
-                pos++;  // value
-            } else if ((status & 0xF0) == 0xF0) {  // SysEx / Meta
-                // Handle meta events
-                uint8_t metaType = trackData[pos];
-                pos++;
-                // Parameter length
-                if (pos >= end) break;
-                uint8_t length = trackData[pos];
-                pos++;
-                // Skip length bytes
-                pos += length;
-                // Check for tempo change meta event (0x51)
-                if (metaType == 0x51 && pos <= end) {
-                    // Tempo events have 3 bytes: microseconds per quarter note
-                    if (pos + 3 <= end) {
-                        uint8_t* tdata = const_cast<uint8_t*>(trackData);
-                        uint32_t usPerQuarter = (static_cast<uint32_t>(tdata[pos]) << 16) |
-                                               (static_cast<uint32_t>(tdata[pos+1]) << 8) |
-                                               static_cast<uint32_t>(tdata[pos+2]);
-                        currentTempoBpm = 60.0 / (usPerQuarter / 1e6);
-                        pos += 3;
+            if (st == 0xFF) {
+                if (p >= end) break;
+                uint8_t type = d[p++];
+                uint32_t n;
+                if (!vlq(d, p, end, n) || p + n > end) break;
+                if (type == 0x03 && name.empty()) name.assign(d.begin() + p, d.begin() + p + n);
+                if (type == 0x51 && n == 3) tempos[tick] = be(d, p, 3);
+                p += n;
+                if (type == 0x2F) break;
+            } else if (st == 0xF0 || st == 0xF7) {
+                uint32_t n;
+                if (!vlq(d, p, end, n) || p + n > end) break;
+                p += n;
+            } else {
+                const uint8_t kind = st & 0xF0;
+                const size_t need = (kind == 0xC0 || kind == 0xD0) ? 1 : 2;
+                if (p + need > end) break;
+                const int note = d[p], vel = need == 2 ? d[p + 1] : 0;
+                p += need;
+                const int key = ((st & 0x0F) << 8) | note;
+                if (kind == 0x90 && vel > 0) {
+                    pending.emplace(key, tick);  // retrigger of a sounding note is ignored
+                } else if (kind == 0x80 || kind == 0x90) {
+                    auto it = pending.find(key);
+                    if (it != pending.end()) {
+                        notes.push_back({it->second, tick, note});
+                        pending.erase(it);
                     }
                 }
             }
         }
-
-        // Finalize any remaining pending notes at end of track
-        // (notes that were turned on but never turned off)
-        double endSec = (absoluteTimeTicks * 60.0) / (currentTempoBpm * ticksPerQuarter);
-        for (auto& [note, startTick] : pendingNotes) {
-            int64_t durationTicks = absoluteTimeTicks - startTick;
-            double durationSec = (durationTicks * 60.0) / (currentTempoBpm * ticksPerQuarter);
-            notes.push_back({endSec, durationSec, (int)note, -1});
-        }
-
-        // Build the track with name and instrument
-        song.tracks[t] = { .name = "Track " + std::to_string(t), .instrument = "unknown", .notes = std::move(notes) };
+        for (auto& [key, on] : pending) notes.push_back({on, tick, key & 0xFF});
+        raw.emplace_back(name, std::move(notes));
     }
 
+    // Tick -> seconds through the tempo map.
+    if (!tempos.count(0)) tempos[0] = 500000;
+    std::vector<std::tuple<uint64_t, double, uint32_t>> seg;  // tick, seconds at tick, tempo
+    double secs = 0;
+    uint64_t lastTick = 0;
+    uint32_t lastTempo = tempos.begin()->second;
+    for (auto& [t, us] : tempos) {
+        secs += double(t - lastTick) * lastTempo / 1e6 / song.division;
+        seg.emplace_back(t, secs, us);
+        lastTick = t;
+        lastTempo = us;
+    }
+    auto toSec = [&](uint64_t t) {
+        auto it = std::upper_bound(seg.begin(), seg.end(), t,
+                                   [](uint64_t v, const auto& s) { return v < std::get<0>(s); });
+        const auto& [st, ss, us] = *--it;
+        return ss + double(t - st) * us / 1e6 / song.division;
+    };
+    song.tempoBpm = 60e6 / std::get<2>(seg.front());
+
+    for (size_t i = 0; i < raw.size(); ++i) {
+        MidiTrack tr{raw[i].first.empty() ? "Track " + std::to_string(i) : raw[i].first, "unknown", {}};
+        std::sort(raw[i].second.begin(), raw[i].second.end(),
+                  [](const RawNote& a, const RawNote& b) { return a.on < b.on; });
+        for (auto& n : raw[i].second) {
+            double s = toSec(n.on);
+            tr.notes.push_back({s, toSec(n.off) - s, n.midi, -1});
+        }
+        song.tracks.push_back(std::move(tr));
+    }
     return song;
 }
 
 std::optional<MidiTrack> getTrack(const MidiSong& song, size_t trackIndex) {
-    if (trackIndex < song.tracks.size()) {
-        return song.tracks[trackIndex];
-    }
+    if (trackIndex < song.tracks.size()) return song.tracks[trackIndex];
     return std::nullopt;
 }
