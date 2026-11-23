@@ -81,6 +81,7 @@ public:
 
     TempoTrainingView* tempoView() const { return tempo_; }
     TunerWidget* tunerView() const { return tuner_; }
+    MusicTrainingView* musicView() const { return music_; }
     QTabWidget* tabs() const { return tabs_; }
     QLabel* errorBanner() const { return errorBanner_; }
     QLabel* warningNotice() const { return warning_; }
@@ -144,6 +145,8 @@ private:
     std::unique_ptr<Session> session_;
     IAudioBackend* backend_ = nullptr;  // owned by session_
     std::string sessIn_, sessOut_;
+    double musicPauseSec_ = 0;   // song position where Pausar stopped the music session
+    double musicResumeSec_ = 0;  // one-shot: start position for the next Music start
     bool starting_ = false, running_ = false, devicesReady_ = false, listing_ = false;
     int countIn_ = 0;  // count-in (beats) of the current session
     Mode sessMode_ = Mode::Training;  // mode of the current (or starting) session

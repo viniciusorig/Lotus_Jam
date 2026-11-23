@@ -38,6 +38,7 @@ struct SessionConfig {
     std::vector<MidiNote> songNotes;  // notes to practice (from selected MIDI track)
     double speedFactor = 1.0;         // 0.5 = 50% speed, 1.0 = normal
     double songBpm = 120;             // MIDI tempo (clicks play at this rate / speed)
+    double startAtSec = 0;            // resume position in song seconds (notes before it are skipped)
 };
 
 // Event for the UI thread.
@@ -155,6 +156,9 @@ private:
     double gain_ = 1.0;
     double songStartSec_ = 0.0;  // Music mode: when the song started (backend time)
     bool musicFinishedEmitted_ = false;
+    int64_t songStartFrame_ = 0;  // Music mode: output frame where song time 0 sounds
+    size_t skippedNotes_ = 0;     // Music mode: notes before startAtSec (keeps UI note indices)
+    std::vector<MidiNote> songNotes_;  // Music mode: notes after startAtSec, shifted to start at 0
 
     std::thread analysis_, scoring_;
     std::atomic<bool> stopReq_{false};

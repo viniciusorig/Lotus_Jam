@@ -332,6 +332,20 @@ void MainWindow::buildUi() {
     connect(tuner_, &TunerWidget::transcribeStopRequested, this, &MainWindow::stopSession);
     connect(music_, &MusicTrainingView::startRequested, this, [this] { startSession(Mode::Music); });
     connect(music_, &MusicTrainingView::stopRequested, this, &MainWindow::stopSession);
+    connect(music_, &MusicTrainingView::pauseRequested, this, [this] {
+        if (music_->isPaused()) {
+            musicResumeSec_ = musicPauseSec_;
+            startSession(Mode::Music);
+        } else if (running_ && sessMode_ == Mode::Music) {
+            musicPauseSec_ = std::max(0.0, music_->pianoRoll()->currentTime());
+            stopSession();
+            music_->setPaused(true);
+        }
+    });
+    connect(music_, &MusicTrainingView::restartRequested, this, [this] {
+        if (running_ && sessMode_ == Mode::Music) stopSession();
+        if (!running_ && !starting_) startSession(Mode::Music);
+    });
     connect(music_, &MusicTrainingView::configChanged, this, [this] { scheduleSave(); });
     // The tuner keeps the device combos and the gain enabled: a change restarts it.
     // currentIndexChanged comes only from the user (or tests): a scan refills the combos with
@@ -398,6 +412,8 @@ void MainWindow::setEngine(Engine e) {
     // the badge never clips nor makes the header jump between states.
     badge_->ensurePolished();
     const QString current = badge_->text();
+    badge_->setMinimumWidth(0);  // measure unconstrained: a previous fixed width must not feed the hint
+    badge_->setMaximumWidth(QWIDGETSIZE_MAX);
     int widest = 0;
     for (const QString& t : engineBadgeTexts()) {
         badge_->setText(t);  // invalidates QLabel's cached size hint
@@ -498,7 +514,10 @@ void MainWindow::reconcile() {
     QWidget* current = tabs_->currentWidget();
     const bool wantTuner = current == tuner_ && tunerArmed_ && devicesReady_;
     if (running_) {
-        const bool keep = sessMode_ == Mode::Tuner ? wantTuner && !tunerRestart_ : current == tempo_;
+        const bool keep = sessMode_ == Mode::Tuner      ? wantTuner && !tunerRestart_
+                          : sessMode_ == Mode::Music      ? current == music_
+                          : sessMode_ == Mode::Transcribe ? current == tuner_
+                                                          : current == tempo_;
         if (!keep) stopSession();  // synchronous: the Stopped event is dispatched here
     }
     if (!running_ && wantTuner) {
@@ -573,6 +592,8 @@ void MainWindow::startSession(Mode mode) {
         cfg.instrument = &tuner_->instrument();
         cfg.a4 = tuner_->a4();
         cfg.speedFactor = music_->speedFactor();
+        cfg.startAtSec = musicResumeSec_;
+        musicResumeSec_ = 0;
         cfg.songBpm = music_->song().tempoBpm > 0 ? music_->song().tempoBpm : 120.0;
         const int track = music_->selectedTrack();
         if (track >= 0 && track < static_cast<int>(music_->song().tracks.size())) {
@@ -599,8 +620,10 @@ void MainWindow::startSession(Mode mode) {
         tuner_->setTranscribing(true);
         lockInputs(true);
     } else if (music) {
-        music_->pianoRoll()->clear();
-        music_->pianoRoll()->setSong(music_->song(), music_->selectedTrack());
+        if (cfg.startAtSec <= 0) {  // a resume keeps the marks of what was already played
+            music_->pianoRoll()->clear();
+            music_->pianoRoll()->setSong(music_->song(), music_->selectedTrack());
+        }
         music_->setRunning(true);
         lockInputs(true);
     } else {

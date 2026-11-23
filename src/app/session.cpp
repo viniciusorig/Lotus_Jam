@@ -138,11 +138,18 @@ bool Session::start(const SessionConfig& cfg, std::string& err) {
         Tuning chromatic{"Cromático", {}};
         tuner_ = std::make_unique<::Tuner>(kSampleRate, *cfg.instrument, chromatic, cfg.a4,
                                              ::Tuner::kDefaultMinRms * gain_);
-        // Click at song tempo adjusted by speed factor (no count-in).
+        // Resume: drop the notes before startAtSec (the list is sorted by start) and shift the rest.
+        skippedNotes_ = 0;
+        while (skippedNotes_ < cfg.songNotes.size() && cfg.songNotes[skippedNotes_].start < cfg.startAtSec - 1e-9)
+            ++skippedNotes_;
+        songNotes_.assign(cfg.songNotes.begin() + skippedNotes_, cfg.songNotes.end());
+        for (auto& n : songNotes_) n.start -= cfg.startAtSec;
+        // Click at song tempo adjusted by speed factor, with a 4-beat count-in; the song (and its
+        // scoring) starts on the first beat after it, so click, backing track and UI share one origin.
         const double effectiveBpm = cfg.songBpm * cfg.speedFactor;
-        clicks_ = std::make_unique<ClickScheduler>(kSampleRate, effectiveBpm, 0);
-        // Backing track: sine waves for all notes.
-        midiSynth_ = std::make_unique<MidiSynth>(kSampleRate, cfg.songNotes, cfg.speedFactor);
+        clicks_ = std::make_unique<ClickScheduler>(kSampleRate, effectiveBpm, 4);
+        songStartFrame_ = std::llround(double(clicks_->firstBeatFrame()) + 4.0 * clicks_->framesPerBeat());
+        midiSynth_ = std::make_unique<MidiSynth>(kSampleRate, songNotes_, cfg.speedFactor, songStartFrame_);
         ClickScheduler* cs = clicks_.get();
         MidiSynth* ms = midiSynth_.get();
         backend_->setRenderer([cs, ms](float* out, size_t frames, int64_t first) {
@@ -410,7 +417,7 @@ void Session::scoringLoop() {
     double lastWarn = -std::numeric_limits<double>::infinity();
     uint64_t warnedDropped = 0, warnedEvictions = 0;
     bool dirty = true;
-    double lastMusicTime = -1.0;
+    double lastMusicTime = -std::numeric_limits<double>::infinity();
     auto emit = [this](UiEvent::Type t, int64_t n, double a, double b) {
         UiEvent e;
         e.type = t;
@@ -422,7 +429,7 @@ void Session::scoringLoop() {
     auto emitMusicNote = [this](const NoteResult& r) {
         UiEvent e;
         e.type = UiEvent::MusicNote;
-        e.n = r.noteIndex;
+        e.n = r.noteIndex < 0 ? r.noteIndex : r.noteIndex + static_cast<int64_t>(skippedNotes_);
         e.a = r.errorMs;
         e.b = r.score;
         e.noteKind = static_cast<int>(r.kind);
@@ -525,17 +532,21 @@ void Session::scoringLoop() {
 
             // Initialize NoteScorer on first tick (we need backend time)
             if (!noteScorer_) {
-                songStartSec_ = nowSec + 2.0;  // 2 second countdown
+                if (!outMap_->ready()) {
+                    std::this_thread::sleep_for(kScoringTick);
+                    continue;
+                }
+                songStartSec_ = outMap_->timeOf(double(songStartFrame_));  // audible time of song 0
                 noteScorer_ = std::make_unique<NoteScorer>(
-                    cfg_.songNotes, cfg_.speedFactor, cfg_.compensationMs / 1000.0, songStartSec_);
+                    songNotes_, cfg_.speedFactor, cfg_.compensationMs / 1000.0, songStartSec_);
             }
 
             // Emit time updates for UI sync (~20 Hz)
             const double songTime = nowSec - songStartSec_;
-            if (songTime >= 0 && songTime - lastMusicTime >= 0.05) {
+            if (songTime - lastMusicTime >= 0.05) {  // negative during the count-in
                 UiEvent te;
                 te.type = UiEvent::MusicTime;
-                te.a = songTime / cfg_.speedFactor;  // actual song time
+                te.a = songTime * cfg_.speedFactor + cfg_.startAtSec;  // position in song seconds
                 pushScoring(te, false);
                 lastMusicTime = songTime;
             }

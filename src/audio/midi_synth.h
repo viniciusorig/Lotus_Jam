@@ -10,13 +10,15 @@
 // Thread-safe: render() may be called from the audio callback.
 class MidiSynth {
 public:
-    MidiSynth(double sampleRate, const std::vector<MidiNote>& notes, double speedFactor);
+    // startOffsetFrames: output frame at which song time 0 is heard (after the count-in).
+    MidiSynth(double sampleRate, const std::vector<MidiNote>& notes, double speedFactor,
+              int64_t startOffsetFrames = 0);
 
     // Renders stereo interleaved samples for the given frame range.
     // firstFrame is absolute output frame; output is added to existing buffer content.
     void render(float* stereoInterleaved, size_t frames, int64_t firstFrame) noexcept;
 
-    // Duration of the song in frames (after speed adjustment).
+    // Duration of the song in frames (after speed adjustment), counted from song time 0.
     int64_t durationFrames() const noexcept { return durationFrames_; }
 
 private:

@@ -11,7 +11,8 @@ double midiToFreq(int midi) {
 }
 }  // namespace
 
-MidiSynth::MidiSynth(double sampleRate, const std::vector<MidiNote>& notes, double speedFactor)
+MidiSynth::MidiSynth(double sampleRate, const std::vector<MidiNote>& notes, double speedFactor,
+                     int64_t startOffsetFrames)
     : sr_(sampleRate), speed_(speedFactor > 0 ? speedFactor : 1.0) {
     double maxEnd = 0.0;
     for (const auto& n : notes) {
@@ -19,8 +20,10 @@ MidiSynth::MidiSynth(double sampleRate, const std::vector<MidiNote>& notes, doub
         v.startFrame = (n.start / speed_) * sr_;
         v.endFrame = ((n.start + n.duration) / speed_) * sr_;
         v.freq = midiToFreq(n.midi);
-        voices_.push_back(v);
         maxEnd = std::max(maxEnd, v.endFrame);
+        v.startFrame += double(startOffsetFrames);
+        v.endFrame += double(startOffsetFrames);
+        voices_.push_back(v);
     }
     durationFrames_ = static_cast<int64_t>(maxEnd + sr_);  // 1 second grace
 }

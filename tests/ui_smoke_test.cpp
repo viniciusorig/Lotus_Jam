@@ -39,6 +39,8 @@
 #include "audio/fake_backend.h"
 #include "ui/device_select.h"
 #include "ui/level_meter.h"
+#include "ui/music_training_view.h"
+#include "ui/piano_roll_widget.h"
 #include "ui/main_window.h"
 #include "ui/pulse_widget.h"
 #include "ui/score_summary_card.h"
@@ -1589,4 +1591,95 @@ int main(int argc, char** argv) {
     theme::apply(app);
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
+}
+
+// Music tab: a MIDI file imported, then Iniciar. Repro for "nao inicia".
+TEST(UiSmoke, MusicSessionWithFakeBackend) {
+    const QString mid = QDir::tempPath() + "/music_smoke.mid";
+    {
+        // One track, 480 ticks, 120 BPM: C4 then E4, a quarter note each.
+        const unsigned char b[] = {'M','T','h','d',0,0,0,6,0,0,0,1,1,0xE0,
+                                   'M','T','r','k',0,0,0,0x17,
+                                   0,0x90,60,80, 0x83,0x60,0x80,60,0, 0,0x90,64,80, 0x83,0x60,0x80,64,0,
+                                   0,0xFF,0x2F,0};
+        QFile f(mid);
+        ASSERT_TRUE(f.open(QIODevice::WriteOnly));
+        f.write(reinterpret_cast<const char*>(b), sizeof b);
+    }
+    FakeFactory ff;
+    MainWindow w(ff.make(), fakeDevices);
+    w.resize(1180, 760);
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    MusicTrainingView* v = w.musicView();
+    w.tabs()->setCurrentWidget(v);
+    v->loadFile(mid);
+    ASSERT_TRUE(v->hasSong());
+    ASSERT_EQ(v->song().tracks[0].notes.size(), 2u);
+    ASSERT_TRUE(v->startButton()->isEnabled());
+    int badgeW = 0;
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        v->startButton()->click();
+        ASSERT_TRUE(pumpUntil([&] { return v->isRunning() && w.engineBadge()->text() == "MOTOR ATIVO"; }))
+            << w.engineBadge()->text().toStdString() << " / " << w.errorBanner()->text().toStdString();
+        if (v->isRunning()) v->startButton()->click();  // Parar (the short song may have ended already)
+        ASSERT_TRUE(pumpUntil([&] { return !v->isRunning(); }));
+        EXPECT_TRUE(w.errorBanner()->isHidden());
+        if (cycle == 0) badgeW = w.engineBadge()->width();
+        EXPECT_EQ(w.engineBadge()->width(), badgeW);  // badge does not grow with each start/stop
+    }
+}
+
+// Pausar / Continuar / Reiniciar on the music tab, and the song clock origin.
+TEST(UiSmoke, MusicPauseResumeRestart) {
+    const QString mid = QDir::tempPath() + "/music_smoke2.mid";
+    {
+        // 120 BPM, 8 quarter notes C4..: long enough to pause in the middle.
+        std::vector<unsigned char> b = {'M','T','h','d',0,0,0,6,0,0,0,1,1,0xE0,'M','T','r','k',0,0,0,0};
+        for (int i = 0; i < 8; ++i) for (unsigned char x : {(unsigned char)0, (unsigned char)0x90, (unsigned char)(60 + i), (unsigned char)80,
+                                                             (unsigned char)0x83, (unsigned char)0x60, (unsigned char)0x80, (unsigned char)(60 + i), (unsigned char)0}) b.push_back(x);
+        for (unsigned char x : {0, 0xFF, 0x2F, 0}) b.push_back(x);
+        const size_t len = b.size() - 22;
+        b[18] = len >> 24; b[19] = len >> 16; b[20] = len >> 8; b[21] = len;
+        QFile f(mid);
+        ASSERT_TRUE(f.open(QIODevice::WriteOnly));
+        f.write(reinterpret_cast<const char*>(b.data()), qint64(b.size()));
+    }
+    FakeFactory ff;
+    ff.speed = 1;  // real-time fake clock so the song position moves slowly
+    MainWindow w(ff.make(), fakeDevices);
+    w.resize(1180, 760);
+    w.show();
+    ASSERT_TRUE(pumpUntil([&] { return w.devicesReady(); }));
+    MusicTrainingView* v = w.musicView();
+    w.tabs()->setCurrentWidget(v);
+    v->loadFile(mid);
+    ASSERT_TRUE(v->hasSong());
+    EXPECT_FALSE(v->pauseButton()->isEnabled());
+    EXPECT_FALSE(v->restartButton()->isEnabled());
+
+    v->startButton()->click();
+    ASSERT_TRUE(pumpUntil([&] { return v->isRunning(); }));
+    EXPECT_TRUE(v->pauseButton()->isEnabled());
+    // The count-in is 4 beats (2 s): the roll starts at a negative time and reaches song time 0.
+    ASSERT_TRUE(pumpUntil([&] { return v->pianoRoll()->currentTime() > 0.3; }));
+    v->pauseButton()->click();  // Pausar
+    ASSERT_TRUE(pumpUntil([&] { return !v->isRunning(); }));
+    EXPECT_TRUE(v->isPaused());
+    EXPECT_EQ(v->pauseButton()->text(), QString("Continuar"));
+    const double pausedAt = v->pianoRoll()->currentTime();
+
+    v->pauseButton()->click();  // Continuar
+    ASSERT_TRUE(pumpUntil([&] { return v->isRunning(); }));
+    EXPECT_FALSE(v->isPaused());
+    ASSERT_TRUE(pumpUntil([&] { return v->pianoRoll()->currentTime() > pausedAt + 0.2; }))
+        << v->pianoRoll()->currentTime() << " vs " << pausedAt;
+
+    v->restartButton()->click();  // Reiniciar
+    ASSERT_TRUE(pumpUntil([&] { return v->isRunning() && v->pianoRoll()->currentTime() < 0.0; }))
+        << v->pianoRoll()->currentTime();
+    v->startButton()->click();  // Parar
+    ASSERT_TRUE(pumpUntil([&] { return !v->isRunning(); }));
+    EXPECT_FALSE(v->isPaused());
+    EXPECT_FALSE(v->pauseButton()->isEnabled());
 }

@@ -26,7 +26,10 @@ public:
     // Session control
     void setRunning(bool running);
     bool isRunning() const { return running_; }
+    bool isPaused() const { return paused_; }
+    void setPaused(bool paused);  // stopped but resumable: "Continuar" instead of "Pausar"
     void setStartAllowed(bool allowed);
+    void loadFile(const QString& path);  // parse a MIDI file and show it (onImport minus the dialog)
 
     // Update display during playback
     void setTime(double nowSec);
@@ -40,11 +43,15 @@ public:
     // Test accessors
     PianoRollWidget* pianoRoll() const { return roll_; }
     QPushButton* startButton() const { return start_; }
+    QPushButton* pauseButton() const { return pause_; }
+    QPushButton* restartButton() const { return restart_; }
     QComboBox* trackCombo() const { return trackCombo_; }
 
 Q_SIGNALS:
     void startRequested();
     void stopRequested();
+    void pauseRequested();    // Pausar (running) or Continuar (paused)
+    void restartRequested();  // from the beginning
     void configChanged();
 
 private Q_SLOTS:
@@ -57,6 +64,7 @@ private:
     void updateSpeedLabel();
 
     bool running_ = false;
+    bool paused_ = false;
     bool startAllowed_ = false;
     MidiSong song_;
     QString filePath_;
@@ -68,6 +76,9 @@ private:
     QSlider* speedSlider_ = nullptr;
     QLabel* speedLabel_ = nullptr;
     QPushButton* start_ = nullptr;
+    QPushButton* pause_ = nullptr;
+    QPushButton* restart_ = nullptr;
+    void refreshButtons();
 
     // Display
     PianoRollWidget* roll_ = nullptr;

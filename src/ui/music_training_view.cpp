@@ -80,6 +80,18 @@ MusicTrainingView::MusicTrainingView(QWidget* parent) : QWidget(parent) {
 
     ch->addStretch(1);
 
+    pause_ = new QPushButton("Pausar", controls);
+    pause_->setMinimumWidth(100);
+    pause_->setCursor(Qt::PointingHandCursor);
+    pause_->setEnabled(false);
+    ch->addWidget(pause_, 0, Qt::AlignBottom);
+
+    restart_ = new QPushButton(QString::fromUtf8("Reiniciar"), controls);
+    restart_->setMinimumWidth(100);
+    restart_->setCursor(Qt::PointingHandCursor);
+    restart_->setEnabled(false);
+    ch->addWidget(restart_, 0, Qt::AlignBottom);
+
     // Start/Stop button
     start_ = new QPushButton("Iniciar", controls);
     start_->setObjectName("PrimaryAction");
@@ -112,6 +124,8 @@ MusicTrainingView::MusicTrainingView(QWidget* parent) : QWidget(parent) {
     connect(importBtn_, &QPushButton::clicked, this, &MusicTrainingView::onImport);
     connect(trackCombo_, &QComboBox::currentIndexChanged, this, &MusicTrainingView::onTrackChanged);
     connect(speedSlider_, &QSlider::valueChanged, this, &MusicTrainingView::onSpeedChanged);
+    connect(pause_, &QPushButton::clicked, this, &MusicTrainingView::pauseRequested);
+    connect(restart_, &QPushButton::clicked, this, &MusicTrainingView::restartRequested);
     connect(start_, &QPushButton::clicked, this, [this] {
         if (running_)
             Q_EMIT stopRequested();
@@ -129,8 +143,11 @@ void MusicTrainingView::onImport() {
         QString(),
         QString::fromUtf8("Arquivos MIDI (*.mid *.midi);;Todos os arquivos (*)")
     );
-    if (path.isEmpty()) return;
+    if (!path.isEmpty()) loadFile(path);
+}
 
+void MusicTrainingView::loadFile(const QString& path) {
+    paused_ = false;
     filePath_ = path;
     song_ = parseMidiFile(path.toStdString());
 
@@ -170,6 +187,8 @@ void MusicTrainingView::updateTrackCombo() {
 }
 
 void MusicTrainingView::onTrackChanged(int index) {
+    paused_ = false;  // a resume position belongs to one track
+    refreshButtons();
     if (index >= 0 && index < static_cast<int>(song_.tracks.size())) {
         roll_->setSong(song_, index);
         statsLabel_->setText(QString::fromUtf8("Trilha %1 • %2 notas")
@@ -196,8 +215,21 @@ double MusicTrainingView::speedFactor() const {
     return speedSlider_->value() / 100.0;
 }
 
+void MusicTrainingView::refreshButtons() {
+    pause_->setText(paused_ ? "Continuar" : "Pausar");
+    pause_->setEnabled(running_ || paused_);
+    restart_->setEnabled(running_ || paused_);
+}
+
+void MusicTrainingView::setPaused(bool paused) {
+    paused_ = paused && !running_;
+    refreshButtons();
+}
+
 void MusicTrainingView::setRunning(bool running) {
     running_ = running;
+    if (running) paused_ = false;
+    refreshButtons();
     start_->setEnabled(running || (startAllowed_ && hasSong()));
     start_->setText(running ? "Parar" : "Iniciar");
     start_->setProperty("running", running);
