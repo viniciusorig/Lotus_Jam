@@ -28,17 +28,19 @@ void drain(SpscRing<T>& r) {
 }
 
 bool validate(const SessionConfig& c, std::string& err) {
-    if (!std::isfinite(c.bpm) || c.bpm < 30.0 || c.bpm > 240.0) {
-        err = "O andamento deve estar entre 30 e 240 BPM.";
-        return false;
-    }
-    if (c.countIn < 0 || c.countIn > 64) {
-        err = "Contagem inválida.";
-        return false;
-    }
-    if (c.subdivision != 1 && c.subdivision != 2 && c.subdivision != 4) {
-        err = "A subdivisão deve ser 1, 2 ou 4 notas por batida.";
-        return false;
+    if (c.mode == Mode::Training) {
+        if (!std::isfinite(c.bpm) || c.bpm < 30.0 || c.bpm > 240.0) {
+            err = "O andamento deve estar entre 30 e 240 BPM.";
+            return false;
+        }
+        if (c.countIn < 0 || c.countIn > 64) {
+            err = "Contagem inválida.";
+            return false;
+        }
+        if (c.subdivision != 1 && c.subdivision != 2 && c.subdivision != 4) {
+            err = "A subdivisão deve ser 1, 2 ou 4 notas por batida.";
+            return false;
+        }
     }
     if (!std::isfinite(c.compensationMs) || std::fabs(c.compensationMs) > 1000.0) {
         err = "Compensação de latência inválida.";
@@ -55,6 +57,20 @@ bool validate(const SessionConfig& c, std::string& err) {
         }
         if (!std::isfinite(c.a4) || c.a4 < 400.0 || c.a4 > 480.0) {
             err = "A referência do Lá (A4) deve estar entre 400 e 480 Hz.";
+            return false;
+        }
+    }
+    if (c.mode == Mode::Music) {
+        if (c.songNotes.empty()) {
+            err = "Importe um arquivo MIDI e selecione uma trilha.";
+            return false;
+        }
+        if (!c.instrument) {
+            err = "Escolha um instrumento.";
+            return false;
+        }
+        if (!std::isfinite(c.speedFactor) || c.speedFactor < 0.25 || c.speedFactor > 2.0) {
+            err = "A velocidade deve estar entre 25% e 200%.";
             return false;
         }
     }
@@ -97,6 +113,9 @@ bool Session::start(const SessionConfig& cfg, std::string& err) {
     onset_.reset();
     tuner_.reset();
     scorer_.reset();
+    noteScorer_.reset();
+    songStartSec_ = 0.0;
+    drain(detectedNotes_);
     if (cfg.mode == Mode::Training) {
         clicks_ = std::make_unique<ClickScheduler>(kSampleRate, cfg.bpm, cfg.countIn);
         onset_ = std::make_unique<OnsetDetector>(kSampleRate);
@@ -105,10 +124,18 @@ bool Session::start(const SessionConfig& cfg, std::string& err) {
                                                [this](int64_t k) { return slotTime(k); });
         ClickScheduler* cs = clicks_.get();
         backend_->setRenderer([cs](float* out, size_t frames, int64_t first) { cs->render(out, frames, first); });
-    } else {
+    } else if (cfg.mode == Mode::Tuner) {
         // A4/instrument/tuning are fixed at Tuner construction: changing them needs a restart.
         tuner_ = std::make_unique<::Tuner>(kSampleRate, *cfg.instrument, cfg.tuning, cfg.a4,
                                              ::Tuner::kDefaultMinRms * gain_);
+        backend_->setRenderer([](float* out, size_t frames, int64_t) { std::fill(out, out + 2 * frames, 0.0f); });
+    } else {
+        // Music mode: use Tuner for pitch detection, NoteScorer for scoring.
+        // Use chromatic tuning (empty strings) so any note is detected.
+        Tuning chromatic{"Cromático", {}};
+        tuner_ = std::make_unique<::Tuner>(kSampleRate, *cfg.instrument, chromatic, cfg.a4,
+                                             ::Tuner::kDefaultMinRms * gain_);
+        // NoteScorer is created when the song actually starts (we need songStartSec_).
         backend_->setRenderer([](float* out, size_t frames, int64_t) { std::fill(out, out + 2 * frames, 0.0f); });
     }
     {
@@ -258,7 +285,7 @@ void Session::analysisLoop() {
             found.clear();
             onset_->feed(x.data(), n, found);
             onsets_.write(found.data(), found.size());  // a full ring drops onsets (never waits)
-        } else {
+        } else if (cfg_.mode == Mode::Tuner) {
             tuner_->feed(x.data(), n);
             TunerReading r;
             while (tuner_->poll(r)) {
@@ -266,6 +293,20 @@ void Session::analysisLoop() {
                 e.type = UiEvent::Tuner;
                 e.tuner = r;
                 pushAnalysis(e);
+            }
+        } else {
+            // Music mode: detect pitch and send to scoring thread
+            tuner_->feed(x.data(), n);
+            TunerReading r;
+            while (tuner_->poll(r)) {
+                if (r.voiced && r.midi >= 0) {
+                    // Convert frame position to time using inputTimeline
+                    const double t = inTimeline_->timeOf(double(frames));
+                    if (std::isfinite(t)) {
+                        DetectedNote dn{t, r.midi, r.cents};
+                        detectedNotes_.write(&dn, 1);
+                    }
+                }
             }
         }
         frames += int64_t(n);
@@ -309,21 +350,35 @@ void Session::reapWriters(bool all) {
 void Session::scoringLoop() {
     std::array<TimePoint, 64> tp;
     std::array<int64_t, 64> ons;
+    std::array<DetectedNote, 64> notes;
     std::vector<ScoreEvent> misses;
+    std::vector<NoteResult> musicMisses;
     misses.reserve(64);
+    musicMisses.reserve(64);
     std::string err;
     const bool training = cfg_.mode == Mode::Training;
+    const bool music = cfg_.mode == Mode::Music;
     int64_t nextBeat = 0;
     auto lastRefresh = std::chrono::steady_clock::now() - kSummaryEvery;
     double lastWarn = -std::numeric_limits<double>::infinity();
     uint64_t warnedDropped = 0, warnedEvictions = 0;
     bool dirty = true;
+    double lastMusicTime = -1.0;
     auto emit = [this](UiEvent::Type t, int64_t n, double a, double b) {
         UiEvent e;
         e.type = t;
         e.n = n;
         e.a = a;
         e.b = b;
+        pushScoring(e, false);
+    };
+    auto emitMusicNote = [this](const NoteResult& r) {
+        UiEvent e;
+        e.type = UiEvent::MusicNote;
+        e.n = r.noteIndex;
+        e.a = r.errorMs;
+        e.b = r.score;
+        e.noteKind = static_cast<int>(r.kind);
         pushScoring(e, false);
     };
 
@@ -415,6 +470,45 @@ void Session::scoringLoop() {
                 refreshSummary();
                 lastRefresh = wall;
                 dirty = false;
+            }
+        } else if (music) {
+            // Music mode: process detected notes through NoteScorer
+            const bool ready = !inTimeline_->empty();
+            const double nowSec = backend_->nowSec();
+
+            // Initialize NoteScorer on first tick (we need backend time)
+            if (!noteScorer_) {
+                songStartSec_ = nowSec + 2.0;  // 2 second countdown
+                noteScorer_ = std::make_unique<NoteScorer>(
+                    cfg_.songNotes, cfg_.speedFactor, cfg_.compensationMs / 1000.0, songStartSec_);
+            }
+
+            // Emit time updates for UI sync (~20 Hz)
+            const double songTime = nowSec - songStartSec_;
+            if (songTime >= 0 && songTime - lastMusicTime >= 0.05) {
+                UiEvent te;
+                te.type = UiEvent::MusicTime;
+                te.a = songTime / cfg_.speedFactor;  // actual song time
+                pushScoring(te, false);
+                lastMusicTime = songTime;
+            }
+
+            // Process detected notes
+            size_t n;
+            while ((n = detectedNotes_.read(notes.data(), notes.size())) > 0) {
+                for (size_t i = 0; i < n; ++i) {
+                    if (!ready) continue;
+                    if (auto r = noteScorer_->onNote(notes[i])) {
+                        emitMusicNote(*r);
+                    }
+                }
+            }
+
+            // Advance and check for missed notes
+            if (ready && noteScorer_) {
+                musicMisses.clear();
+                noteScorer_->advance(nowSec, musicMisses);
+                for (const auto& m : musicMisses) emitMusicNote(m);
             }
         }
         // Segments behind the analysis are no longer needed (memory stays bounded). Training

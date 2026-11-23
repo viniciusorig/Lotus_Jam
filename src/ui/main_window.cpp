@@ -31,7 +31,8 @@
 #include "ui/theme.h"
 #include "ui/timeline_widget.h"
 #include "ui/tuner_widget.h"
-#include "ui/midi_import_widget.h"
+#include "ui/music_training_view.h"
+#include "ui/piano_roll_widget.h"
 
 DeviceLists listPipeWireDevices() { return DeviceLists{listInputDevices(), listOutputDevices()}; }
 
@@ -299,8 +300,8 @@ void MainWindow::buildUi() {
     tabs_->addTab(tuner_, "AFINADOR");
     tempo_ = new TempoTrainingView(tabs_);
     tabs_->addTab(tempo_, "TREINO DE TEMPO");
-    midiImportWidget_ = new MidiImportWidget(tabs_);
-    tabs_->addTab(midiImportWidget_, "MÚSICAS & MIDI");
+    music_ = new MusicTrainingView(tabs_);
+    tabs_->addTab(music_, QString::fromUtf8("MÚSICAS & MIDI"));
     tabs_->setCurrentIndex(1);
     root->addWidget(tabs_, 1);
 
@@ -325,6 +326,9 @@ void MainWindow::buildUi() {
         reconcile();
     });
     connect(tuner_, &TunerWidget::configChanged, this, &MainWindow::onTunerConfigChanged);
+    connect(music_, &MusicTrainingView::startRequested, this, [this] { startSession(Mode::Music); });
+    connect(music_, &MusicTrainingView::stopRequested, this, &MainWindow::stopSession);
+    connect(music_, &MusicTrainingView::configChanged, this, [this] { scheduleSave(); });
     // The tuner keeps the device combos and the gain enabled: a change restarts it.
     // currentIndexChanged comes only from the user (or tests): a scan refills the combos with
     // their signals blocked and onDevicesListed reports a changed selection once. A choice made
@@ -464,6 +468,7 @@ void MainWindow::onDevicesListed() {
 void MainWindow::syncStartAllowed() {
     tempo_->setStartAllowed(devicesReady_ && !(starting_ && sessMode_ == Mode::Tuner));
     tuner_->setStartAllowed(devicesReady_ && !(starting_ && sessMode_ == Mode::Training));
+    music_->setStartAllowed(devicesReady_ && !(starting_ && sessMode_ != Mode::Music));
 }
 
 void MainWindow::onTabChanged() {
@@ -540,7 +545,8 @@ void MainWindow::startSession(Mode mode) {
     SessionConfig cfg;
     cfg.mode = mode;
     cfg.compensationMs = comp_->value();
-    if (!tuner) {
+    const bool music = mode == Mode::Music;
+    if (mode == Mode::Training) {
         sessComp_ = cfg.compensationMs;
         stepMs_ = 60000.0 / tempo_->bpm() / tempo_->subdivision();
         offsets_.clear();
@@ -554,6 +560,15 @@ void MainWindow::startSession(Mode mode) {
         cfg.tuning = tuner_->tuning();
         cfg.a4 = tuner_->a4();
         sessTunerGen_ = tunerGen_;
+    } else if (music) {
+        // Music mode: use tuner's instrument for pitch detection, song notes from the view.
+        cfg.instrument = &tuner_->instrument();
+        cfg.a4 = tuner_->a4();
+        cfg.speedFactor = music_->speedFactor();
+        const int track = music_->selectedTrack();
+        if (track >= 0 && track < static_cast<int>(music_->song().tracks.size())) {
+            cfg.songNotes = music_->song().tracks[static_cast<size_t>(track)].notes;
+        }
     } else {
         cfg.bpm = tempo_->bpm();
         cfg.countIn = tempo_->countInBeats();
@@ -571,6 +586,11 @@ void MainWindow::startSession(Mode mode) {
     if (tuner) {
         tuner_->clearReading();
         tuner_->setStarting(true);
+    } else if (music) {
+        music_->pianoRoll()->clear();
+        music_->pianoRoll()->setSong(music_->song(), music_->selectedTrack());
+        music_->setRunning(true);
+        lockInputs(true);
     } else {
         tempo_->pulse()->reset();
         tempo_->timeline()->clear();
@@ -609,6 +629,7 @@ void MainWindow::onStartFinished() {
     starting_ = false;
     const bool tuner = sessMode_ == Mode::Tuner;
     syncStartAllowed();
+    const bool music = sessMode_ == Mode::Music;
     if (!ok) {
         refresh_->setEnabled(!listing_);
         running_ = false;
@@ -616,6 +637,8 @@ void MainWindow::onStartFinished() {
             tunerArmed_ = false;  // no retry loop: the pill shows "Iniciar"
             tunerRestart_ = false;
             tuner_->setRunning(false);
+        } else if (music) {
+            music_->setRunning(false);
         } else {
             tempo_->setRunning(false);
         }
@@ -627,6 +650,8 @@ void MainWindow::onStartFinished() {
     running_ = true;
     if (tuner)
         tuner_->setRunning(true);
+    else if (music)
+        music_->setRunning(true);
     else
         tempo_->setRunning(true);
     setEngine(Engine::Running);
@@ -746,6 +771,14 @@ void MainWindow::dispatchEvents(const std::vector<UiEvent>& events) {
         case UiEvent::Stopped:
             stopped = true;
             break;
+        case UiEvent::MusicNote:
+            if (sessMode_ == Mode::Music && running_)
+                music_->setNoteResult(static_cast<int>(e.n), e.noteKind);
+            break;
+        case UiEvent::MusicTime:
+            if (sessMode_ == Mode::Music && running_)
+                music_->setTime(e.a);
+            break;
         }
     }
     if (peak >= 0.0) level_->setPeak(peak);
@@ -758,6 +791,8 @@ void MainWindow::dispatchEvents(const std::vector<UiEvent>& events) {
             tuner_->setRunning(false);
             tuner_->clearReading();
             if (!userStop_) tunerArmed_ = false;  // device failure: no automatic restart
+        } else if (sessMode_ == Mode::Music) {
+            music_->setRunning(false);
         } else {
             tempo_->setRunning(false);
             if (session_) tempo_->summaryCard()->setSummary(session_->summary());

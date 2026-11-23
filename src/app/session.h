@@ -13,12 +13,14 @@
 #include "audio/click_scheduler.h"
 #include "core/clock_map.h"
 #include "core/ring_buffer.h"
+#include "dsp/midi_parser.h"
 #include "dsp/notes.h"
 #include "dsp/onset.h"
 #include "dsp/tuner.h"
 #include "score/grid_scorer.h"
+#include "score/note_scorer.h"
 
-enum class Mode { Training, Tuner };
+enum class Mode { Training, Tuner, Music };
 
 struct SessionConfig {
     Mode mode = Mode::Training;
@@ -27,9 +29,12 @@ struct SessionConfig {
     int subdivision = 1;        // 1, 2 or 4 scored slots per beat
     double compensationMs = 0;  // latency compensation subtracted from played times
     double gainDb = 0;          // digital input gain (analysis only; recordings are raw)
-    const Instrument* instrument = nullptr;  // required in Tuner mode
+    const Instrument* instrument = nullptr;  // required in Tuner and Music modes
     Tuning tuning;                           // required in Tuner mode
     double a4 = 440;  // fixed for the session: changing A4/instrument/tuning needs a restart
+    // Music mode
+    std::vector<MidiNote> songNotes;  // notes to practice (from selected MIDI track)
+    double speedFactor = 1.0;         // 0.5 = 50% speed, 1.0 = normal
 };
 
 // Event for the UI thread.
@@ -47,12 +52,15 @@ struct SessionConfig {
 //           failed recordSample() WAV write comes from a writer thread that outlives the
 //           session, so it can arrive after that session's Stopped.
 //   Warning: text = pt-BR message for a non-fatal problem (input overload); the session goes on.
+//   MusicNote: Music mode - n = note index, a = error ms, b = score, noteKind = NoteResult::Kind.
+//   MusicTime: Music mode - a = current playback time in seconds (for UI sync).
 struct UiEvent {
-    enum Type { Beat, Note, Miss, Extra, Tuner, Level, Error, Stopped, Warning } type = Beat;
+    enum Type { Beat, Note, Miss, Extra, Tuner, Level, Error, Stopped, Warning, MusicNote, MusicTime } type = Beat;
     int64_t n = 0;
     double a = 0, b = 0;
     TunerReading tuner{};
     std::string text;
+    int noteKind = 0;  // NoteResult::Kind for MusicNote events
 };
 
 // One training/tuner session on top of an IAudioBackend (reused across start/stop cycles).
@@ -129,9 +137,11 @@ private:
     std::unique_ptr<OnsetDetector> onset_;
     std::unique_ptr<::Tuner> tuner_;
     std::unique_ptr<GridScorer> scorer_;
+    std::unique_ptr<NoteScorer> noteScorer_;  // Music mode
     std::unique_ptr<InputTimeline> inTimeline_;  // input frame -> capture time, gap aware
     std::unique_ptr<ClockMap> outMap_;
     double gain_ = 1.0;
+    double songStartSec_ = 0.0;  // Music mode: when the song started (backend time)
 
     std::thread analysis_, scoring_;
     std::atomic<bool> stopReq_{false};
@@ -140,6 +150,7 @@ private:
     std::atomic<int64_t> analysedFrames_{0};
 
     SpscRing<int64_t> onsets_{1024};
+    SpscRing<DetectedNote> detectedNotes_{1024};  // Music mode: analysis -> scoring
     SpscRing<UiEvent> anaEvents_{64};
     SpscRing<UiEvent> scoEvents_{4096};
     static constexpr size_t kReserve = 8;
