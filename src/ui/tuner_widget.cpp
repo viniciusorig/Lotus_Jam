@@ -386,7 +386,8 @@ protected:
         const QStringList& labels = t_->labels_;  // cached per tuning change
         const int n = int(labels.size());
         if (n == 0) return;
-        const double w = 84, h = 42, gap = 14;
+        const bool chromatic = n == 12;
+        const double w = chromatic ? 56 : 84, h = 42, gap = chromatic ? 6 : 14;
         const double total = n * w + (n - 1) * gap;
         double x = (width() - total) / 2.0;
         const double y = (height() - h) / 2.0;
@@ -402,9 +403,11 @@ protected:
             p.setPen(on ? onPen_ : offPen_);
             p.setBrush(on ? onBrush_ : offBrush_);
             p.drawRoundedRect(r, 10, 10);
-            p.setFont(numFont_);
-            p.setPen(numPen_);
-            p.drawText(r.adjusted(8, 4, 0, 0), Qt::AlignLeft | Qt::AlignTop, QString::number(i + 1));
+            if (!chromatic) {
+                p.setFont(numFont_);
+                p.setPen(numPen_);
+                p.drawText(r.adjusted(8, 4, 0, 0), Qt::AlignLeft | Qt::AlignTop, QString::number(i + 1));
+            }
             p.setFont(font_);
             p.setPen(on ? textOnPen_ : textPen_);
             p.drawText(r, Qt::AlignCenter, labels[i]);
@@ -542,8 +545,15 @@ void TunerWidget::rebuildTunings() {
 
 void TunerWidget::refreshViews() {
     labels_.clear();
-    for (int m : tuning().strings) labels_ << QString::fromStdString(noteName(m));
-    tuningCombo_->setToolTip(QString::fromUtf8("Afinação (cordas: %1)").arg(notesOf(tuning())));
+    const Tuning t = tuning();
+    if (t.strings.empty()) {
+        // Chromatic mode: show all 12 pitch classes
+        for (const char* n : {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"})
+            labels_ << QString::fromUtf8(n);
+    } else {
+        for (int m : t.strings) labels_ << QString::fromStdString(noteName(m));
+    }
+    tuningCombo_->setToolTip(QString::fromUtf8("Afinação (cordas: %1)").arg(notesOf(t)));
     dial_->update();
     strip_->update();
 }
@@ -556,7 +566,9 @@ double TunerWidget::smoothStep(double shown, double target, double dtSec) {
 void TunerWidget::setReading(const TunerReading& in) {
     TunerReading r = in;
     const int strings = int(labels_.size());
-    if (!r.voiced || r.stringIndex < 0 || r.stringIndex >= strings || !std::isfinite(r.cents))
+    const bool chromatic = r.voiced && r.midi >= 0 && tuning().strings.empty();
+    if (!r.voiced || !std::isfinite(r.cents) ||
+        (!chromatic && (r.stringIndex < 0 || r.stringIndex >= strings)))
         r = TunerReading{false, -1, 0, 0, 0};
     reading_ = r;
     updateTexts();
@@ -631,7 +643,10 @@ void TunerWidget::updateTexts() {
     note_.clear();
     status_ = QString("Sem sinal");
     if (!reading_.voiced) return;
-    if (reading_.stringIndex >= 0 && reading_.stringIndex < int(labels_.size())) note_ = labels_[reading_.stringIndex];
+    if (reading_.midi >= 0)
+        note_ = QString::fromStdString(noteName(reading_.midi));
+    else if (reading_.stringIndex >= 0 && reading_.stringIndex < int(labels_.size()))
+        note_ = labels_[reading_.stringIndex];
     const QLocale loc;  // pt-BR: "82,41 Hz  •  +0,4 cents"
     double c = std::round(reading_.cents * 10.0) / 10.0;
     if (c == 0.0) c = 0.0;  // no "-0,0"
@@ -639,7 +654,11 @@ void TunerWidget::updateTexts() {
     status_ = loc.toString(reading_.hz, 'f', 2) + QString::fromUtf8(" Hz  •  ") + cents + " cents";
 }
 
-int TunerWidget::highlightedString() const { return reading_.voiced ? reading_.stringIndex + 1 : 0; }
+int TunerWidget::highlightedString() const {
+    if (!reading_.voiced) return 0;
+    if (reading_.midi >= 0) return ((reading_.midi % 12) + 12) % 12 + 1;  // chromatic: 1-12 (C=1)
+    return reading_.stringIndex + 1;
+}
 
 bool TunerWidget::glowActive() const { return reading_.voiced && std::fabs(reading_.cents) <= kGlowCents; }
 

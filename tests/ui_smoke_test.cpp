@@ -867,8 +867,8 @@ TEST(UiSmoke, TunerGlowWhenInTune) {
 
 TEST(UiSmoke, TunerSwitchesInstrument) {
     TunerWidget t;
-    const QStringList std3 = {QString::fromUtf8("Padrão"), "Drop D", "Meio-tom abaixo"};
-    const QStringList std4 = {QString::fromUtf8("Padrão"), "Drop D", "Meio-tom abaixo", "DADGAD"};
+    const QStringList std3 = {QString::fromUtf8("Padrão"), "Drop D", "Meio-tom abaixo", "Cromático"};
+    const QStringList std4 = {QString::fromUtf8("Padrão"), "Drop D", "Meio-tom abaixo", "DADGAD", "Cromático"};
     auto tunings = [&] {
         QStringList l;
         for (int i = 0; i < t.tuningCombo()->count(); ++i) l << t.tuningCombo()->itemText(i);

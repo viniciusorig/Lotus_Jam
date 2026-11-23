@@ -31,6 +31,7 @@
 #include "ui/theme.h"
 #include "ui/timeline_widget.h"
 #include "ui/tuner_widget.h"
+#include "ui/midi_import_widget.h"
 
 DeviceLists listPipeWireDevices() { return DeviceLists{listInputDevices(), listOutputDevices()}; }
 
@@ -298,8 +299,8 @@ void MainWindow::buildUi() {
     tabs_->addTab(tuner_, "AFINADOR");
     tempo_ = new TempoTrainingView(tabs_);
     tabs_->addTab(tempo_, "TREINO DE TEMPO");
-    tabs_->addTab(placeholder(QString::fromUtf8("MÚSICAS & MIDI"), QString::fromUtf8("Em breve — Partes 2 e 3"), tabs_),
-                  QString::fromUtf8("MÚSICAS && MIDI"));  // "&&": a literal '&' (not a mnemonic)
+    midiImportWidget_ = new MidiImportWidget(tabs_);
+    tabs_->addTab(midiImportWidget_, "MÚSICAS & MIDI");
     tabs_->setCurrentIndex(1);
     root->addWidget(tabs_, 1);
 

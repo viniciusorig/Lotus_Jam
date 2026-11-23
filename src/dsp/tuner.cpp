@@ -10,6 +10,8 @@ constexpr double kMinProbability = 0.8;
 // Second half of the window at least 15 dB (power x30) above the first: onset transient.
 constexpr double kOnsetRatio = 30.0;
 
+double rangeMax(const Instrument& i, const Tuning& t) { return t.strings.empty() ? i.maxHz * 3.5 : i.maxHz; }
+
 TunerReading unvoiced() { return {false, -1, 0.0, 0.0, 0.0}; }
 
 double median3(double a, double b, double c) {
@@ -19,8 +21,9 @@ double median3(double a, double b, double c) {
 
 Tuner::Tuner(double sampleRate, const Instrument& instrument, const Tuning& tuning, double a4,
              double minRms)
-    : yin_(sampleRate, instrument.minHz, instrument.maxHz), minHz_(instrument.minHz),
-      maxHz_(instrument.maxHz), a4_(a4), minRms_(minRms), tuning_(tuning),
+    : yin_(sampleRate, instrument.minHz, rangeMax(instrument, tuning), 0.12),
+      minHz_(instrument.minHz), maxHz_(rangeMax(instrument, tuning)), a4_(a4), minRms_(minRms),
+      chromatic_(tuning.strings.empty()), tuning_(tuning),
       hop_(size_t(std::max(1.0, std::floor(sampleRate / 20.0)))),
       ring_(yin_.requiredSamples(), 0.0f), linear_(yin_.requiredSamples(), 0.0f) {}
 
@@ -110,6 +113,12 @@ void Tuner::analyse() {
     // Median of the last 3 voiced pitches; with fewer, the latest one (no added latency).
     double hz = historyCount_ == 3 ? median3(history_[0], history_[1], history_[2]) : p.hz;
 
+    if (chromatic_) {
+        const int note = int(std::lround(hzToMidi(hz, a4_)));
+        const double target = midiToHz(note, a4_);
+        push({true, -1, hz, target, centsBetween(hz, target), note});
+        return;
+    }
     StringMatch m = nearestString(tuning_, hz, a4_);
     push({true, m.stringIndex, hz, m.targetHz, m.cents});
 }

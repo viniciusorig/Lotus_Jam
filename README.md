@@ -45,7 +45,9 @@ PCM2902, ≈ −39 dBFS), o **ganho** digital aplicado à análise e a **compens
   Escolha o instrumento (violão, guitarra, baixo de 4, 5 ou 6 cordas), a afinação (Padrão,
   Drop D, Meio-tom abaixo, DADGAD no violão/guitarra) e a referência do Lá (A4). Mostra a nota,
   a corda mais próxima, a frequência e o desvio em cents; o mostrador acende (“Nana Glow”)
-  dentro de ±5 cents. Sem nota reconhecível aparece “Sem sinal”.
+  dentro de ±5 cents. Sem nota reconhecível aparece “Sem sinal”. Uma afinação adicional
+  **Cromático** (sem cordas) reporta **todas** as notas contra o semitono mais próximo, sem
+  se prender a uma afinação predeterminada.
 - **TREINO DE TEMPO** — escolha o andamento (BPM), a contagem (sem contagem, 1 ou 2
   compassos) e as notas por batida (1, 2 ou 4). Iniciar toca um sinal de partida, a contagem e
   depois o clique contínuo (todos iguais, sem acento). Toque junto: cada nota aparece no

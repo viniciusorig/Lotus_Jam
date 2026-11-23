@@ -12,6 +12,7 @@
 #include "app/session.h"
 #include "audio/backend.h"
 #include "ui/device_select.h"
+#include "ui/midi_import_widget.h"
 
 class QComboBox;
 class QDoubleSpinBox;
@@ -165,6 +166,7 @@ private:
     QTabWidget* tabs_ = nullptr;
     TempoTrainingView* tempo_ = nullptr;
     TunerWidget* tuner_ = nullptr;
+    MidiImportWidget* midiImportWidget_ = nullptr;
     QLabel* errorBanner_ = nullptr;
     QLabel* warning_ = nullptr;
     QLabel* badge_ = nullptr;

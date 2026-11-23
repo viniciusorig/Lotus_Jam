@@ -10,11 +10,14 @@ struct TunerReading {
     bool voiced;
     int stringIndex;  // index into Tuning::strings; -1 when not voiced (other fields 0)
     double hz, targetHz, cents;
+    int midi = -1;  // chromatic mode: the nearest note (MIDI number); -1 in string mode
 };
 
 // Tuner service for the analysis thread (single-threaded). Keeps a sliding window of the
 // last Yin::requiredSamples() input samples and analyses it every 50 ms of input
 // (>= 20 readings per second), starting as soon as the window is first full.
+// With a tuning that has no strings ("Cromático") every note is reported against the nearest
+// semitone (stringIndex = -1, midi = note) and the range extends up to 3.5x the instrument's.
 // Readings that are unvoiced, outside [minHz, maxHz], below probability 0.8, or from a window
 // whose RMS is below minRms (silence, mains hum, noise) are reported as voiced=false. A pitch
 // far from every string (a slack string, or the wrong tuning selected) is NOT rejected: it
@@ -40,6 +43,7 @@ private:
 
     Yin yin_;
     double minHz_, maxHz_, a4_, minRms_;
+    bool chromatic_;
     Tuning tuning_;
     size_t hop_;
 

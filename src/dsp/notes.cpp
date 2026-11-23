@@ -43,6 +43,9 @@ Instrument make(std::string id, std::string label, std::vector<int> standard, bo
     }
     in.minHz = 0.9 * midiToHz(lo);
     in.maxHz = 1.2 * midiToHz(hi);
+    // Chromatic: no strings; any note is reported against the nearest semitone (the Tuner
+    // recognises it by the empty string list and widens the range upwards).
+    in.tunings.push_back({"Cromático", {}});
     return in;
 }
 

@@ -1,0 +1,16 @@
+/home/orig/treino/CMakeLists.txt
+/home/orig/treino/README.md
+/home/orig/treino/docs/front/briefing_de_ui_ux_e_arquitetura_frontend_lotus_jam.md
+/home/orig/treino/docs/superpowers/notes/parte1-paridade.md
+/home/orig/treino/docs/superpowers/plans/2026-11-17-parte1-nucleo-afinador-tempo.md
+/home/orig/treino/docs/superpowers/specs/2026-11-17-treino-design.md
+/home/orig/treino/docs/validacao-parte1.md
+/home/orig/treino/tests/CMakeLists.txt
+/home/orig/treino/resources/icons/chevron_down.svg
+/home/orig/treino/resources/icons/chevron_up.svg
+/home/orig/treino/resources/icons/lotus_jam.svg
+/home/orig/treino/resources/icons/lotus_jam_128.png
+/home/orig/treino/resources/icons/lotus_jam_16.png
+/home/orig/treino/resources/icons/lotus_jam_256.png
+/home/orig/treino/resources/icons/lotus_jam_32.png
+/home/orig/treino/resources/icons/lotus_jam_64.png

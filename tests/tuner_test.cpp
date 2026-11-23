@@ -152,3 +152,49 @@ TEST(Tuner, PluckOnsetNeverGivesWildReadings) {
     }
   EXPECT_GT(voiced, 5);
 }
+
+// Chromatic tuning (empty strings) reports every note against the nearest semitone.
+TEST(Tuner, ChromaticModeReportsAllNotes) {
+  const Instrument& v = inst("violao");
+  // Last tuning is "Cromático" with empty strings
+  const Tuning& chromatic = v.tunings.back();
+  EXPECT_TRUE(chromatic.strings.empty());
+  EXPECT_EQ(chromatic.name, std::string("Cromático"));
+
+  Tuner tuner(kSr, v, chromatic, 440.0);
+  // Test a few notes across the range
+  for (int midi : {40, 45, 50, 55, 64, 69}) {
+    auto rs = run(tuner, tone(midiToHz(midi), 0.5));
+    ASSERT_FALSE(rs.empty()) << "midi " << midi;
+    const TunerReading& r = rs.back();
+    EXPECT_TRUE(r.voiced) << "midi " << midi;
+    EXPECT_EQ(r.stringIndex, -1) << "midi " << midi;
+    EXPECT_EQ(r.midi, midi) << "midi " << midi;
+    EXPECT_NEAR(r.targetHz, midiToHz(midi), 1e-6) << "midi " << midi;
+    EXPECT_NEAR(r.cents, 0.0, 1.0) << "midi " << midi;
+  }
+  // Extended range: 3.5x instrument maxHz
+  double highHz = midiToHz(84);  // well above standard range
+  auto rs = run(tuner, tone(highHz, 0.5));
+  ASSERT_FALSE(rs.empty());
+  const TunerReading& r = rs.back();
+  EXPECT_TRUE(r.voiced);
+  EXPECT_EQ(r.stringIndex, -1);
+  EXPECT_EQ(r.midi, int(std::lround(hzToMidi(highHz, 440.0))));
+  EXPECT_NEAR(r.targetHz, midiToHz(r.midi), 1e-6);
+  EXPECT_NEAR(r.cents, 0.0, 1.0);
+}
+
+// Chromatic mode respects custom A4.
+TEST(Tuner, ChromaticModeHonoursA4) {
+  const Instrument& v = inst("violao");
+  const Tuning& chromatic = v.tunings.back();
+  Tuner tuner(kSr, v, chromatic, 432.0);
+  auto rs = run(tuner, tone(midiToHz(60, 432.0), 0.5));  // C4 at A4=432
+  ASSERT_FALSE(rs.empty());
+  const TunerReading& r = rs.back();
+  EXPECT_TRUE(r.voiced);
+  EXPECT_EQ(r.midi, 60);
+  EXPECT_NEAR(r.targetHz, midiToHz(60, 432.0), 1e-6);
+  EXPECT_NEAR(r.cents, 0.0, 1.0);
+}
