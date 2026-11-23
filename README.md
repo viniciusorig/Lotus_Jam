@@ -1,6 +1,12 @@
-# Lotus Jam 🎸
+<p align="center">
+  <img src="resources/icons/lotus_jam_256.png" alt="Lotus Jam" width="128">
+</p>
 
-Treinador musical em tempo real para **baixo**, **guitarra** e **violino**, para Linux (PipeWire).
+<h1 align="center">Lotus Jam 🎸</h1>
+
+<p align="center">
+  Treinador musical em tempo real para <b>baixo</b>, <b>guitarra</b> e <b>violino</b>, para Linux (PipeWire).
+</p>
 
 **Funcionalidades principais:**
 - 🎯 **Treino de tempo** — toque junto com o metrônomo e veja seu erro em milissegundos
@@ -10,20 +16,16 @@ Treinador musical em tempo real para **baixo**, **guitarra** e **violino**, para
 
 ## Screenshots
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  🪷 Lotus Jam          [Entrada ▼] [Saída ▼] ↻  ▁▃▅▇ 0dB   │
-├─────────────────────────────────────────────────────────────┤
-│  AFINADOR │ TREINO DE TEMPO │ MÚSICAS & MIDI                │
-├─────────────────────────────────────────────────────────────┤
-│                         E2                                  │
-│                      82,41 Hz                               │
-│              ◀──────────│──────────▶                        │
-│                      +2,3 cents                             │
-│                                                             │
-│  [1] [2] [3] [4]  ← cordas do baixo                        │
-└─────────────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/screenshots/tuner.png" alt="Afinador" width="400">
+  <img src="docs/screenshots/tempo.png" alt="Treino de Tempo" width="400">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/music.png" alt="Músicas & MIDI" width="400">
+</p>
+
+> **Nota:** Se as imagens não aparecerem, rode o app e tire screenshots com `scrot -u` ou similar, salvando em `docs/screenshots/`.
 
 ## Compilar
 
