@@ -456,6 +456,16 @@ TunerWidget::TunerWidget(QWidget* parent) : QWidget(parent) {
     ch->addWidget(field(QString::fromUtf8("REFERÊNCIA (A4)"), a4_, controls));
 
     ch->addStretch(1);
+
+    transcribe_ = new QPushButton(QString::fromUtf8("Transcrever"), controls);
+    transcribe_->setObjectName("SecondaryAction");
+    transcribe_->setProperty("running", false);
+    transcribe_->setMinimumWidth(120);
+    transcribe_->setCursor(Qt::PointingHandCursor);
+    transcribe_->setEnabled(false);
+    transcribe_->setToolTip(QString::fromUtf8("Gravar e converter para MIDI"));
+    ch->addWidget(transcribe_, 0, Qt::AlignBottom);
+
     start_ = new QPushButton("Iniciar", controls);
     start_->setObjectName("PrimaryAction");
     start_->setProperty("running", false);
@@ -507,6 +517,12 @@ TunerWidget::TunerWidget(QWidget* parent) : QWidget(parent) {
             Q_EMIT stopRequested();
         else
             Q_EMIT startRequested();
+    });
+    connect(transcribe_, &QPushButton::clicked, this, [this] {
+        if (transcribing_)
+            Q_EMIT transcribeStopRequested();
+        else
+            Q_EMIT transcribeRequested();
     });
 }
 
@@ -634,8 +650,24 @@ void TunerWidget::setStartAllowed(bool allowed) {
     startAllowed_ = allowed;
     if (start_->text() == QString::fromUtf8("Iniciando…")) return;
     start_->setEnabled(running_ || startAllowed_);
+    transcribe_->setEnabled(!running_ && !transcribing_ && startAllowed_);
     if (!running_)
         start_->setToolTip(allowed ? QString("Iniciar o afinador") : QString::fromUtf8("Procurando dispositivos…"));
+}
+
+void TunerWidget::setTranscribing(bool transcribing) {
+    transcribing_ = transcribing;
+    transcribe_->setEnabled(transcribing || (!running_ && startAllowed_));
+    transcribe_->setText(transcribing ? "Parar" : "Transcrever");
+    transcribe_->setToolTip(transcribing ? QString::fromUtf8("Parar gravação e gerar MIDI")
+                                         : QString::fromUtf8("Gravar e converter para MIDI"));
+    transcribe_->setProperty("running", transcribing);
+    restyle(transcribe_);
+    // Disable other controls while transcribing
+    start_->setEnabled(!transcribing && (running_ || startAllowed_));
+    instrument_->setEnabled(!transcribing);
+    tuningCombo_->setEnabled(!transcribing);
+    a4_->setEnabled(!transcribing);
 }
 
 // Note and readout are formatted once per reading (the dial repaints up to 60 Hz).

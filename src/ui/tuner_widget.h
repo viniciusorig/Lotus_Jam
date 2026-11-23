@@ -74,11 +74,17 @@ public:
     QDoubleSpinBox* a4Spin() const { return a4_; }
     QPushButton* startButton() const { return start_; }
 
+    // Transcription mode
+    void setTranscribing(bool transcribing);
+    bool isTranscribing() const { return transcribing_; }
+
 Q_SIGNALS:
     void startRequested();
     void stopRequested();
     void configChanged();  // instrument, tuning or A4 changed (by the user or programmatically)
     void readingApplied(const TunerReading& r);  // after setReading() (tests observe readings)
+    void transcribeRequested();
+    void transcribeStopRequested();
 
 private:
     friend class TunerDial;
@@ -89,7 +95,7 @@ private:
     void restyle(QWidget* w);
     void updateTexts();
 
-    bool running_ = false, startAllowed_ = false;
+    bool running_ = false, startAllowed_ = false, transcribing_ = false;
     TunerReading reading_{false, -1, 0, 0, 0};
     double shown_ = 0.0;      // pointer (cents)
     double pulsePhase_ = 0.0;  // glow ring pulse, seconds
@@ -103,6 +109,7 @@ private:
     QComboBox* tuningCombo_ = nullptr;
     QDoubleSpinBox* a4_ = nullptr;
     QPushButton* start_ = nullptr;
+    QPushButton* transcribe_ = nullptr;
     TunerDial* dial_ = nullptr;
     StringStrip* strip_ = nullptr;
 };

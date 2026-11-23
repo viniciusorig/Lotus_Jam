@@ -115,6 +115,7 @@ bool Session::start(const SessionConfig& cfg, std::string& err) {
     scorer_.reset();
     noteScorer_.reset();
     midiSynth_.reset();
+    transcriber_.reset();
     songStartSec_ = 0.0;
     musicFinishedEmitted_ = false;
     drain(detectedNotes_);
@@ -131,7 +132,7 @@ bool Session::start(const SessionConfig& cfg, std::string& err) {
         tuner_ = std::make_unique<::Tuner>(kSampleRate, *cfg.instrument, cfg.tuning, cfg.a4,
                                              ::Tuner::kDefaultMinRms * gain_);
         backend_->setRenderer([](float* out, size_t frames, int64_t) { std::fill(out, out + 2 * frames, 0.0f); });
-    } else {
+    } else if (cfg.mode == Mode::Music) {
         // Music mode: use Tuner for pitch detection, NoteScorer for scoring.
         // Use chromatic tuning (empty strings) so any note is detected.
         Tuning chromatic{"Cromático", {}};
@@ -148,6 +149,10 @@ bool Session::start(const SessionConfig& cfg, std::string& err) {
             cs->render(out, frames, first);  // click first (overwrites)
             ms->render(out, frames, first);  // synth adds on top
         });
+    } else if (cfg.mode == Mode::Transcribe) {
+        // Transcribe mode: listen and convert to MIDI.
+        transcriber_ = std::make_unique<Transcriber>(kSampleRate, ::Tuner::kDefaultMinRms * gain_);
+        backend_->setRenderer([](float* out, size_t frames, int64_t) { std::fill(out, out + 2 * frames, 0.0f); });
     }
     {
         std::lock_guard<std::mutex> lk(summaryMutex_);
@@ -177,6 +182,16 @@ void Session::stop() {
     scoring_.join();
     backend_->setRenderer(nullptr);
     delete recReq_.exchange(nullptr, std::memory_order_acq_rel);  // never started: cancelled
+
+    // Finish transcription if in Transcribe mode
+    if (cfg_.mode == Mode::Transcribe && transcriber_) {
+        transcriber_->finish();
+        UiEvent te;
+        te.type = UiEvent::TranscribeDone;
+        te.n = static_cast<int64_t>(transcriber_->notes().size());
+        pushScoring(te, true);
+    }
+
     // The scoring thread is gone, so this thread is now the only producer of scoEvents_.
     if (!stoppedEmitted_.load(std::memory_order_acquire)) {
         UiEvent e;
@@ -225,6 +240,18 @@ NoteScorer::Summary Session::musicSummary() const {
     std::lock_guard<std::mutex> lk(summaryMutex_);
     if (noteScorer_) return noteScorer_->summary();
     return {};
+}
+
+std::vector<MidiNote> Session::transcribedNotes() const {
+    std::lock_guard<std::mutex> lk(summaryMutex_);
+    if (transcriber_) return transcriber_->notes();
+    return {};
+}
+
+double Session::transcribedBpm() const {
+    std::lock_guard<std::mutex> lk(summaryMutex_);
+    if (transcriber_) return transcriber_->estimatedBpm();
+    return 120.0;
 }
 
 void Session::recordSample(const std::string& wavPath, double seconds) {
@@ -311,7 +338,7 @@ void Session::analysisLoop() {
                 e.tuner = r;
                 pushAnalysis(e);
             }
-        } else {
+        } else if (cfg_.mode == Mode::Music) {
             // Music mode: detect pitch and send to scoring thread
             tuner_->feed(x.data(), n);
             TunerReading r;
@@ -325,6 +352,9 @@ void Session::analysisLoop() {
                     }
                 }
             }
+        } else if (cfg_.mode == Mode::Transcribe) {
+            // Transcribe mode: feed audio to transcriber
+            transcriber_->feed(x.data(), n);
         }
         frames += int64_t(n);
         // Release: every onset up to `frames` is in onsets_ before this store is seen.

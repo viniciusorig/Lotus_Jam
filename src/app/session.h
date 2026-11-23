@@ -19,9 +19,10 @@
 #include "dsp/tuner.h"
 #include "score/grid_scorer.h"
 #include "audio/midi_synth.h"
+#include "dsp/transcriber.h"
 #include "score/note_scorer.h"
 
-enum class Mode { Training, Tuner, Music };
+enum class Mode { Training, Tuner, Music, Transcribe };
 
 struct SessionConfig {
     Mode mode = Mode::Training;
@@ -57,8 +58,9 @@ struct SessionConfig {
 //   MusicNote: Music mode - n = note index, a = error ms, b = score, noteKind = NoteResult::Kind.
 //   MusicTime: Music mode - a = current playback time in seconds (for UI sync).
 //   MusicFinished: Music mode - song ended, summary available.
+//   TranscribeDone: Transcribe mode - transcription complete, notes available via transcribedNotes().
 struct UiEvent {
-    enum Type { Beat, Note, Miss, Extra, Tuner, Level, Error, Stopped, Warning, MusicNote, MusicTime, MusicFinished } type = Beat;
+    enum Type { Beat, Note, Miss, Extra, Tuner, Level, Error, Stopped, Warning, MusicNote, MusicTime, MusicFinished, TranscribeDone } type = Beat;
     int64_t n = 0;
     double a = 0, b = 0;
     TunerReading tuner{};
@@ -106,6 +108,9 @@ public:
     GridScorer::Summary summary() const;
     // Music mode summary (hits, misses, etc.).
     NoteScorer::Summary musicSummary() const;
+    // Transcribe mode: get transcribed notes after TranscribeDone event.
+    std::vector<MidiNote> transcribedNotes() const;
+    double transcribedBpm() const;
     // Records `seconds` of raw input (16-bit mono 48 kHz WAV at wavPath), starting with the
     // next input block of the running session; ignored when no session runs. A session that
     // stops early writes what was recorded so far; a request not yet started when the session
@@ -144,6 +149,7 @@ private:
     std::unique_ptr<GridScorer> scorer_;
     std::unique_ptr<NoteScorer> noteScorer_;  // Music mode
     std::unique_ptr<MidiSynth> midiSynth_;    // Music mode backing track
+    std::unique_ptr<Transcriber> transcriber_;  // Transcribe mode
     std::unique_ptr<InputTimeline> inTimeline_;  // input frame -> capture time, gap aware
     std::unique_ptr<ClockMap> outMap_;
     double gain_ = 1.0;

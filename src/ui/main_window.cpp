@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -24,6 +25,7 @@
 
 #include "app/settings.h"
 #include "audio/pipewire_backend.h"
+#include "dsp/midi_writer.h"
 #include "ui/level_meter.h"
 #include "ui/pulse_widget.h"
 #include "ui/score_summary_card.h"
@@ -326,6 +328,8 @@ void MainWindow::buildUi() {
         reconcile();
     });
     connect(tuner_, &TunerWidget::configChanged, this, &MainWindow::onTunerConfigChanged);
+    connect(tuner_, &TunerWidget::transcribeRequested, this, [this] { startSession(Mode::Transcribe); });
+    connect(tuner_, &TunerWidget::transcribeStopRequested, this, &MainWindow::stopSession);
     connect(music_, &MusicTrainingView::startRequested, this, [this] { startSession(Mode::Music); });
     connect(music_, &MusicTrainingView::stopRequested, this, &MainWindow::stopSession);
     connect(music_, &MusicTrainingView::configChanged, this, [this] { scheduleSave(); });
@@ -509,11 +513,15 @@ void MainWindow::reconcile() {
 void MainWindow::startSession(Mode mode) {
     if (starting_ || running_ || !devicesReady_) return;  // Iniciar is disabled until the first scan
     const bool tuner = mode == Mode::Tuner;
+    const bool transcribe = mode == Mode::Transcribe;
     // A tuner that cannot start stays stopped (pill "Iniciar") until the user asks again.
-    auto failTuner = [this, tuner] {
-        if (!tuner) return;
-        tunerArmed_ = false;
-        tuner_->setRunning(false);
+    auto failTuner = [this, tuner, transcribe] {
+        if (tuner) {
+            tunerArmed_ = false;
+            tuner_->setRunning(false);
+        } else if (transcribe) {
+            tuner_->setTranscribing(false);
+        }
     };
     if (!pollTimer_.isActive()) pollTimer_.start();  // stopped by a previous close
     if (!summaryTimer_.isActive()) summaryTimer_.start();
@@ -554,12 +562,12 @@ void MainWindow::startSession(Mode mode) {
         tempo_->setCalibrationMessage({});
     }
     cfg.gainDb = gain_->value();
-    if (tuner) {
+    if (tuner || transcribe) {
         // Fixed for the session (the DSP Tuner has no setter): configChanged restarts it.
         cfg.instrument = &tuner_->instrument();
         cfg.tuning = tuner_->tuning();
         cfg.a4 = tuner_->a4();
-        sessTunerGen_ = tunerGen_;
+        if (tuner) sessTunerGen_ = tunerGen_;
     } else if (music) {
         // Music mode: use tuner's instrument for pitch detection, song notes from the view.
         cfg.instrument = &tuner_->instrument();
@@ -587,6 +595,9 @@ void MainWindow::startSession(Mode mode) {
     if (tuner) {
         tuner_->clearReading();
         tuner_->setStarting(true);
+    } else if (transcribe) {
+        tuner_->setTranscribing(true);
+        lockInputs(true);
     } else if (music) {
         music_->pianoRoll()->clear();
         music_->pianoRoll()->setSong(music_->song(), music_->selectedTrack());
@@ -786,6 +797,27 @@ void MainWindow::dispatchEvents(const std::vector<UiEvent>& events) {
                 music_->showSummary(s.hits, s.misses, s.wrongNotes, s.early, s.late, s.extras, s.total);
             }
             break;
+        case UiEvent::TranscribeDone:
+            if (sessMode_ == Mode::Transcribe && session_) {
+                auto notes = session_->transcribedNotes();
+                double bpm = session_->transcribedBpm();
+                if (!notes.empty()) {
+                    QString path = QFileDialog::getSaveFileName(
+                        this, QString::fromUtf8("Salvar MIDI transcrito"),
+                        QString(), QString::fromUtf8("Arquivos MIDI (*.mid)"));
+                    if (!path.isEmpty()) {
+                        if (!path.endsWith(".mid", Qt::CaseInsensitive)) path += ".mid";
+                        if (MidiWriter::write(path.toStdString(), notes, bpm, 16)) {
+                            showWarning(QString::fromUtf8("MIDI salvo: %1 notas em %2").arg(notes.size()).arg(path));
+                        } else {
+                            showError(QString::fromUtf8("Erro ao salvar MIDI em %1").arg(path));
+                        }
+                    }
+                } else {
+                    showWarning(QString::fromUtf8("Nenhuma nota detectada"));
+                }
+            }
+            break;
         }
     }
     if (peak >= 0.0) level_->setPeak(peak);
@@ -798,6 +830,8 @@ void MainWindow::dispatchEvents(const std::vector<UiEvent>& events) {
             tuner_->setRunning(false);
             tuner_->clearReading();
             if (!userStop_) tunerArmed_ = false;  // device failure: no automatic restart
+        } else if (sessMode_ == Mode::Transcribe) {
+            tuner_->setTranscribing(false);
         } else if (sessMode_ == Mode::Music) {
             music_->setRunning(false);
         } else {
