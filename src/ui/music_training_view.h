@@ -31,6 +31,7 @@ public:
     // Update display during playback
     void setTime(double nowSec);
     void setNoteResult(int noteIndex, int kind);  // NoteResult::Kind
+    void showSummary(int hits, int misses, int wrongNotes, int early, int late, int extras, double score);
 
     // Access to the song for Session
     const MidiSong& song() const { return song_; }

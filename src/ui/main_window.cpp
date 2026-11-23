@@ -780,6 +780,12 @@ void MainWindow::dispatchEvents(const std::vector<UiEvent>& events) {
             if (sessMode_ == Mode::Music && running_)
                 music_->setTime(e.a);
             break;
+        case UiEvent::MusicFinished:
+            if (sessMode_ == Mode::Music && running_ && session_) {
+                auto s = session_->musicSummary();
+                music_->showSummary(s.hits, s.misses, s.wrongNotes, s.early, s.late, s.extras, s.total);
+            }
+            break;
         }
     }
     if (peak >= 0.0) level_->setPeak(peak);

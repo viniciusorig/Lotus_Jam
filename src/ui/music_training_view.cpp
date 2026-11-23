@@ -225,3 +225,11 @@ void MusicTrainingView::setTime(double nowSec) {
 void MusicTrainingView::setNoteResult(int noteIndex, int kind) {
     roll_->setNoteResult(noteIndex, static_cast<NoteResult::Kind>(kind));
 }
+
+void MusicTrainingView::showSummary(int hits, int misses, int wrongNotes, int early, int late, int extras, double score) {
+    QString text = QString::fromUtf8(
+        "🎵 Resultado: %1 acertos • %2 erros • %3 notas erradas • %4 cedo • %5 tarde • %6 extras • Pontuação: %7%")
+        .arg(hits).arg(misses).arg(wrongNotes).arg(early).arg(late).arg(extras)
+        .arg(score, 0, 'f', 1);
+    statsLabel_->setText(text);
+}

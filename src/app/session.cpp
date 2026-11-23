@@ -114,7 +114,9 @@ bool Session::start(const SessionConfig& cfg, std::string& err) {
     tuner_.reset();
     scorer_.reset();
     noteScorer_.reset();
+    midiSynth_.reset();
     songStartSec_ = 0.0;
+    musicFinishedEmitted_ = false;
     drain(detectedNotes_);
     if (cfg.mode == Mode::Training) {
         clicks_ = std::make_unique<ClickScheduler>(kSampleRate, cfg.bpm, cfg.countIn);
@@ -138,8 +140,14 @@ bool Session::start(const SessionConfig& cfg, std::string& err) {
         // Click at song tempo adjusted by speed factor (no count-in).
         const double effectiveBpm = cfg.songBpm * cfg.speedFactor;
         clicks_ = std::make_unique<ClickScheduler>(kSampleRate, effectiveBpm, 0);
+        // Backing track: sine waves for all notes.
+        midiSynth_ = std::make_unique<MidiSynth>(kSampleRate, cfg.songNotes, cfg.speedFactor);
         ClickScheduler* cs = clicks_.get();
-        backend_->setRenderer([cs](float* out, size_t frames, int64_t first) { cs->render(out, frames, first); });
+        MidiSynth* ms = midiSynth_.get();
+        backend_->setRenderer([cs, ms](float* out, size_t frames, int64_t first) {
+            cs->render(out, frames, first);  // click first (overwrites)
+            ms->render(out, frames, first);  // synth adds on top
+        });
     }
     {
         std::lock_guard<std::mutex> lk(summaryMutex_);
@@ -211,6 +219,12 @@ bool Session::pollEvents(std::vector<UiEvent>& out) {
 GridScorer::Summary Session::summary() const {
     std::lock_guard<std::mutex> lk(summaryMutex_);
     return summary_;
+}
+
+NoteScorer::Summary Session::musicSummary() const {
+    std::lock_guard<std::mutex> lk(summaryMutex_);
+    if (noteScorer_) return noteScorer_->summary();
+    return {};
 }
 
 void Session::recordSample(const std::string& wavPath, double seconds) {
@@ -512,6 +526,16 @@ void Session::scoringLoop() {
                 musicMisses.clear();
                 noteScorer_->advance(nowSec, musicMisses);
                 for (const auto& m : musicMisses) emitMusicNote(m);
+
+                // Check if song finished (all notes processed + 1 second grace)
+                if (midiSynth_ && nowSec > songStartSec_ + midiSynth_->durationFrames() / kSampleRate) {
+                    if (!musicFinishedEmitted_) {
+                        UiEvent fe;
+                        fe.type = UiEvent::MusicFinished;
+                        pushScoring(fe, false);
+                        musicFinishedEmitted_ = true;
+                    }
+                }
             }
         }
         // Segments behind the analysis are no longer needed (memory stays bounded). Training

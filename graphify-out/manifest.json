@@ -6,15 +6,15 @@
     "semantic_hash": ""
   },
   "src/app/session.cpp": {
-    "mtime": 1794999184.3908138,
-    "seen": 1795003421.954015,
-    "ast_hash": "6fc78e880201328d46c4a39dcc3623e0",
+    "mtime": 1795438849.486272,
+    "seen": 1795438920.542848,
+    "ast_hash": "1846323bacc42280e5ec90594fd4d993",
     "semantic_hash": ""
   },
   "src/app/session.h": {
-    "mtime": 1794997966.1590614,
-    "seen": 1795003421.9540172,
-    "ast_hash": "c2c6307f4824f1543aceff10314f03cf",
+    "mtime": 1795438843.6691754,
+    "seen": 1795438920.5428505,
+    "ast_hash": "cd453f9805197d7bed8180435daa3344",
     "semantic_hash": ""
   },
   "src/app/settings.cpp": {
@@ -198,15 +198,15 @@
     "semantic_hash": ""
   },
   "src/ui/main_window.cpp": {
-    "mtime": 1794999965.6402462,
-    "seen": 1795003421.9540403,
-    "ast_hash": "1c708a7d1aed249ecdb6f144aed4b91b",
+    "mtime": 1795438853.2233343,
+    "seen": 1795438920.5428832,
+    "ast_hash": "ce04aeb1d046afb83b3f31cc263fed80",
     "semantic_hash": ""
   },
   "src/ui/main_window.h": {
-    "mtime": 1794999965.6405182,
-    "seen": 1795003421.954041,
-    "ast_hash": "cfd3916e740bdbf35490147758348443",
+    "mtime": 1795438276.3749683,
+    "seen": 1795438920.5428839,
+    "ast_hash": "96c08a8875772aff331cd44aaf9fa519",
     "semantic_hash": ""
   },
   "src/ui/pulse_widget.cpp": {
@@ -270,9 +270,9 @@
     "semantic_hash": ""
   },
   "src/ui/tuner_widget.cpp": {
-    "mtime": 1795000661.197576,
-    "seen": 1795003421.9540496,
-    "ast_hash": "814620f447561379adb965d4e4963304",
+    "mtime": 1795436490.2684865,
+    "seen": 1795438920.542898,
+    "ast_hash": "398fe9492338d43d526e4476d2ba18b6",
     "semantic_hash": ""
   },
   "src/ui/tuner_widget.h": {
@@ -471,6 +471,72 @@
     "mtime": 1794997966.1517634,
     "seen": 1795003421.9540725,
     "ast_hash": "f5937ca0b7294897bf1c68e3cde441ab",
+    "semantic_hash": ""
+  },
+  "src/dsp/midi_parser.cpp": {
+    "mtime": 1795037337.0736065,
+    "seen": 1795438920.5428667,
+    "ast_hash": "edd69471287499a5d2756c8ae8efe8e6",
+    "semantic_hash": ""
+  },
+  "src/dsp/midi_parser.h": {
+    "mtime": 1795436520.88088,
+    "seen": 1795438920.5428677,
+    "ast_hash": "e6678462eff692709138a23eb5b879fc",
+    "semantic_hash": ""
+  },
+  "src/score/note_scorer.cpp": {
+    "mtime": 1795437923.7216861,
+    "seen": 1795438920.542878,
+    "ast_hash": "524dae89fde216ce9588b96ef532f588",
+    "semantic_hash": ""
+  },
+  "src/score/note_scorer.h": {
+    "mtime": 1795437899.645347,
+    "seen": 1795438920.5428786,
+    "ast_hash": "4028d7fde54a5ab5c30c71745dd6922b",
+    "semantic_hash": ""
+  },
+  "src/ui/midi_import_widget.cpp": {
+    "mtime": 1795436563.5004597,
+    "seen": 1795438920.5428846,
+    "ast_hash": "9836f2dd65c0cdaa496bf820dd4351ae",
+    "semantic_hash": ""
+  },
+  "src/ui/midi_import_widget.h": {
+    "mtime": 1795436533.196044,
+    "seen": 1795438920.5428853,
+    "ast_hash": "6fbe75ff227712f0cc51fea76de681ba",
+    "semantic_hash": ""
+  },
+  "src/ui/music_training_view.cpp": {
+    "mtime": 1795437991.6556604,
+    "seen": 1795438920.5428863,
+    "ast_hash": "742b7e1e7e176d7a5a5ab5e8aaa4281e",
+    "semantic_hash": ""
+  },
+  "src/ui/music_training_view.h": {
+    "mtime": 1795437965.6352842,
+    "seen": 1795438920.5428877,
+    "ast_hash": "ce27c13ce22dc28ff3076eb806640255",
+    "semantic_hash": ""
+  },
+  "src/ui/piano_roll_widget.cpp": {
+    "mtime": 1795437955.0021315,
+    "seen": 1795438920.5428884,
+    "ast_hash": "02fa02b383cc0170ad1b42cb2b306e75",
+    "semantic_hash": ""
+  },
+  "src/ui/piano_roll_widget.h": {
+    "mtime": 1795437934.9098449,
+    "seen": 1795438920.542889,
+    "ast_hash": "552ed853b8b2414a2019f286d851bd58",
+    "semantic_hash": ""
+  },
+  "tests/note_scorer_test.cpp": {
+    "mtime": 1795438712.9280088,
+    "seen": 1795438920.5429037,
+    "ast_hash": "ebb12922c843ba72a79f0f1bd5f520a4",
     "semantic_hash": ""
   }
 }
