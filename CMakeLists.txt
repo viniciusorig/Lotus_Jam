@@ -56,6 +56,10 @@ target_compile_definitions(lotus_ui PUBLIC QT_NO_KEYWORDS)
 add_executable(lotus-jam ${CMAKE_SOURCE_DIR}/src/main.cpp)
 target_link_libraries(lotus-jam PRIVATE lotus_ui)
 
+# Manual tool: measures the real round-trip audio latency (needs a physical loopback).
+add_executable(latency-probe ${CMAKE_SOURCE_DIR}/tools/latency_probe.cpp)
+target_link_libraries(latency-probe PRIVATE treino_core)
+
 enable_testing()
 add_subdirectory(tests)
 
