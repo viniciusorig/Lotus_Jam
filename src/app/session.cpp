@@ -144,6 +144,10 @@ bool Session::start(const SessionConfig& cfg, std::string& err) {
             ++skippedNotes_;
         songNotes_.assign(cfg.songNotes.begin() + skippedNotes_, cfg.songNotes.end());
         for (auto& n : songNotes_) n.start -= cfg.startAtSec;
+        if (songNotes_.empty()) {
+            err = "Não há notas depois do ponto de retomada.";
+            return false;
+        }
         // Click at song tempo adjusted by speed factor, with a 4-beat count-in; the song (and its
         // scoring) starts on the first beat after it, so click, backing track and UI share one origin.
         const double effectiveBpm = cfg.songBpm * cfg.speedFactor;
@@ -351,8 +355,8 @@ void Session::analysisLoop() {
             TunerReading r;
             while (tuner_->poll(r)) {
                 if (r.voiced && r.midi >= 0) {
-                    // Convert frame position to time using inputTimeline
-                    const double t = inTimeline_->timeOf(double(frames));
+                    // The reading describes a window ending in this chunk: time its centre.
+                    const double t = inTimeline_->timeOf(double(r.centerFrame));
                     if (std::isfinite(t)) {
                         DetectedNote dn{t, r.midi, r.cents};
                         detectedNotes_.write(&dn, 1);

@@ -3,7 +3,9 @@
 #include <memory>
 
 #include "dsp/midi_parser.h"
+#include "dsp/notes.h"
 
+class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
@@ -39,11 +41,15 @@ public:
     // Access to the song for Session
     const MidiSong& song() const { return song_; }
     bool hasSong() const { return !song_.tracks.empty(); }
+    void setTuning(const Tuning& t);  // strings used by the "corda:casa" labels
+    double songEndSec() const;  // end of the last note of the selected track (0 without a song)
 
     // Test accessors
     PianoRollWidget* pianoRoll() const { return roll_; }
     QPushButton* startButton() const { return start_; }
     QPushButton* pauseButton() const { return pause_; }
+    QPushButton* backButton() const { return back_; }
+    QPushButton* forwardButton() const { return fwd_; }
     QPushButton* restartButton() const { return restart_; }
     QComboBox* trackCombo() const { return trackCombo_; }
 
@@ -52,6 +58,7 @@ Q_SIGNALS:
     void stopRequested();
     void pauseRequested();    // Pausar (running) or Continuar (paused)
     void restartRequested();  // from the beginning
+    void seekRequested(double deltaSec);  // jump forward (+) or back (-) in the song
     void configChanged();
 
 private Q_SLOTS:
@@ -62,6 +69,7 @@ private Q_SLOTS:
 private:
     void updateTrackCombo();
     void updateSpeedLabel();
+    void refreshLabels();
 
     bool running_ = false;
     bool paused_ = false;
@@ -76,6 +84,10 @@ private:
     QSlider* speedSlider_ = nullptr;
     QLabel* speedLabel_ = nullptr;
     QPushButton* start_ = nullptr;
+    QCheckBox* tabCheck_ = nullptr;
+    Tuning tuning_;
+    QPushButton* back_ = nullptr;
+    QPushButton* fwd_ = nullptr;
     QPushButton* pause_ = nullptr;
     QPushButton* restart_ = nullptr;
     void refreshButtons();

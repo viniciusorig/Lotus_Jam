@@ -9,7 +9,8 @@ NoteScorer::NoteScorer(const std::vector<MidiNote>& notes, double speedFactor,
     : notes_(notes), speed_(speedFactor > 0 ? speedFactor : 1.0),
       comp_(compensationSec), start_(songStartSec) {
     // Sort notes by start time
-    std::sort(notes_.begin(), notes_.end(),
+    // Stable: the piano roll indexes notes in the parser's order, equal starts (chords) included.
+    std::stable_sort(notes_.begin(), notes_.end(),
               [](const MidiNote& a, const MidiNote& b) { return a.start < b.start; });
     state_.resize(notes_.size());
 }

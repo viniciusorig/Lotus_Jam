@@ -41,6 +41,7 @@ private:
     int64_t totalFrames_ = 0;
 
     static constexpr size_t kHopSize = 512;
+    static constexpr size_t kMaxNotes = 100000;  // memory bound for very long or noisy takes
 
     // Current note state
     bool noteActive_ = false;

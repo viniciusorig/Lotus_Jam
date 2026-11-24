@@ -26,9 +26,8 @@ void Transcriber::reset() {
 void Transcriber::feed(const float* samples, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         buf_[bufPos_++] = samples[i];
-        if (bufPos_ >= kHopSize) {
+        if (bufPos_ == buf_.size()) {  // window full: analyse, then wait for kHopSize new samples
             processFrame();
-            // Shift buffer by hop size
             const size_t keep = buf_.size() - kHopSize;
             std::copy(buf_.begin() + kHopSize, buf_.end(), buf_.begin());
             bufPos_ = keep;
@@ -38,11 +37,16 @@ void Transcriber::feed(const float* samples, size_t count) {
 }
 
 void Transcriber::processFrame() {
-    const double currentTime = static_cast<double>(totalFrames_) / sr_;
+    // Time of the newest sample of the window.
+    const double currentTime = static_cast<double>(totalFrames_ + buf_.size()) / sr_;
 
-    // Check for onset
+    // Check for onset: the detector is streaming, so it sees every sample once (the whole
+    // window the first time, then only the newest hop).
     onsetsTemp_.clear();
-    onset_.feed(buf_.data(), kHopSize, onsetsTemp_);
+    if (totalFrames_ == 0)
+        onset_.feed(buf_.data(), buf_.size(), onsetsTemp_);
+    else
+        onset_.feed(buf_.data() + buf_.size() - kHopSize, kHopSize, onsetsTemp_);
     bool isOnset = !onsetsTemp_.empty();
 
     // Calculate RMS
@@ -75,7 +79,7 @@ void Transcriber::processFrame() {
         noteMidi_ = detectedMidi;
         notePitches_.clear();
         notePitches_.push_back(detectedMidi);
-        onsetTimes_.push_back(currentTime);
+        if (onsetTimes_.size() < kMaxNotes) onsetTimes_.push_back(currentTime);
     } else if (noteActive_) {
         if (detectedMidi < 0 || rms < minRms_ * 0.5) {
             // Note ended (silence or too quiet)
@@ -112,7 +116,7 @@ void Transcriber::endCurrentNote(double endTime) {
         std::sort(sorted.begin(), sorted.end());
         int medianMidi = sorted[sorted.size() / 2];
 
-        notes_.push_back({noteStart_, duration, medianMidi, -1});
+        if (notes_.size() < kMaxNotes) notes_.push_back({noteStart_, duration, medianMidi, -1});
     }
 
     noteActive_ = false;
@@ -121,11 +125,7 @@ void Transcriber::endCurrentNote(double endTime) {
 }
 
 void Transcriber::finish() {
-    // Flush any remaining audio in buffer
-    if (bufPos_ > 0) {
-        processFrame();
-    }
-    // End any active note
+    // End any active note (a partial window is not analysed)
     double endTime = static_cast<double>(totalFrames_ + bufPos_) / sr_;
     endCurrentNote(endTime);
 }
@@ -144,7 +144,7 @@ double Transcriber::estimatedBpm() const {
 
     if (intervals.empty()) return 120.0;
 
-    // Find the most common interval (simple histogram)
+    // Median interval
     std::sort(intervals.begin(), intervals.end());
     double medianInterval = intervals[intervals.size() / 2];
 

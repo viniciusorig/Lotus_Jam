@@ -1682,4 +1682,21 @@ TEST(UiSmoke, MusicPauseResumeRestart) {
     ASSERT_TRUE(pumpUntil([&] { return !v->isRunning(); }));
     EXPECT_FALSE(v->isPaused());
     EXPECT_FALSE(v->pauseButton()->isEnabled());
+
+    // Seek (5 s steps, clamped to [0, end of the song = 4 s]): idle parks at the new position
+    // ("Continuar"); running restarts the session from it.
+    EXPECT_TRUE(v->forwardButton()->isEnabled());
+    v->forwardButton()->click();
+    EXPECT_TRUE(v->isPaused());
+    EXPECT_GT(v->pianoRoll()->currentTime(), 3.5);
+    v->backButton()->click();
+    EXPECT_DOUBLE_EQ(v->pianoRoll()->currentTime(), 0.0);
+    v->startButton()->click();
+    ASSERT_TRUE(pumpUntil([&] { return v->isRunning(); }));
+    ASSERT_TRUE(pumpUntil([&] { return v->pianoRoll()->currentTime() > 0.3; }));
+    v->forwardButton()->click();
+    ASSERT_TRUE(pumpUntil([&] { return v->isRunning(); }));
+    EXPECT_FALSE(v->isPaused());
+    v->startButton()->click();
+    ASSERT_TRUE(pumpUntil([&] { return !v->isRunning(); }));
 }

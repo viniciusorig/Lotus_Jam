@@ -33,6 +33,11 @@ MidiSong parseMidiFile(const std::string& filePath) {
     song.division = 480;
 
     std::ifstream f(filePath, std::ios::binary);
+    constexpr size_t kMaxFileBytes = 16u << 20;  // real SMF files are a few hundred KB
+    f.seekg(0, std::ios::end);
+    const auto fileSize = f.tellg();
+    if (fileSize < 0 || size_t(fileSize) > kMaxFileBytes) return song;
+    f.seekg(0);
     std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     if (d.size() < 14 || !std::equal(d.begin(), d.begin() + 4, "MThd") || be(d, 4, 4) < 6) return song;
 
@@ -72,6 +77,7 @@ MidiSong parseMidiFile(const std::string& filePath) {
                 uint8_t type = d[p++];
                 uint32_t n;
                 if (!vlq(d, p, end, n) || p + n > end) break;
+                running = 0;  // meta events cancel running status
                 if (type == 0x03 && name.empty()) name.assign(d.begin() + p, d.begin() + p + n);
                 if (type == 0x51 && n == 3) tempos[tick] = be(d, p, 3);
                 p += n;
@@ -80,6 +86,7 @@ MidiSong parseMidiFile(const std::string& filePath) {
                 uint32_t n;
                 if (!vlq(d, p, end, n) || p + n > end) break;
                 p += n;
+                running = 0;  // sysex cancels running status
             } else {
                 const uint8_t kind = st & 0xF0;
                 const size_t need = (kind == 0xC0 || kind == 0xD0) ? 1 : 2;
@@ -124,9 +131,10 @@ MidiSong parseMidiFile(const std::string& filePath) {
 
     for (size_t i = 0; i < raw.size(); ++i) {
         MidiTrack tr{raw[i].first.empty() ? "Track " + std::to_string(i) : raw[i].first, "unknown", {}};
-        std::sort(raw[i].second.begin(), raw[i].second.end(),
+        std::stable_sort(raw[i].second.begin(), raw[i].second.end(),
                   [](const RawNote& a, const RawNote& b) { return a.on < b.on; });
         for (auto& n : raw[i].second) {
+            if (n.off <= n.on) continue;  // zero-length: cannot be played or scored
             double s = toSec(n.on);
             tr.notes.push_back({s, toSec(n.off) - s, n.midi, -1});
         }

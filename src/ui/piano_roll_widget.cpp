@@ -5,6 +5,11 @@
 
 #include "ui/theme.h"
 
+namespace {
+const char* const kNoteNames[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+QString noteLabel(int midi) { return QString("%1%2").arg(kNoteNames[midi % 12]).arg(midi / 12 - 1); }
+}  // namespace
+
 PianoRollWidget::PianoRollWidget(QWidget* parent) : QWidget(parent) {
     setMinimumSize(400, 200);
     setObjectName("PianoRoll");
@@ -37,9 +42,20 @@ void PianoRollWidget::setSong(const MidiSong& song, int trackIndex) {
     update();
 }
 
+void PianoRollWidget::setLabels(const QStringList& labels) {
+    labels_ = labels;
+    update();
+}
+
 void PianoRollWidget::clear() {
     notes_.clear();
     now_ = 0.0;
+    update();
+}
+
+void PianoRollWidget::clearResultsFrom(double sec) {
+    for (auto& n : notes_)
+        if (n.start >= sec - 1e-9) n.hasResult = false;
     update();
 }
 
@@ -108,7 +124,8 @@ void PianoRollWidget::paintEvent(QPaintEvent*) {
     p.drawLine(nowLineX_, 0, nowLineX_, height());
 
     // Draw notes
-    for (const auto& n : notes_) {
+    for (size_t idx = 0; idx < notes_.size(); ++idx) {
+        const auto& n = notes_[idx];
         const double relStart = n.start - now_ + windowBefore_;
         const double relEnd = relStart + n.duration;
 
@@ -128,16 +145,24 @@ void PianoRollWidget::paintEvent(QPaintEvent*) {
         p.setPen(QPen(border, 1));
         p.setBrush(fill);
         p.drawRoundedRect(nr, 3, 3);
+
+        // Note name on the not-yet-played (white) bars, clipped to the visible part.
+        const QRect vis = nr.intersected(rect());
+        if (!n.hasResult && noteH >= 9 && vis.width() >= 18) {
+            QFont lf = theme::monoFont(9);
+            lf.setPixelSize(std::min(noteH - 2, 12));
+            p.setFont(lf);
+            p.setPen(QColor(0x0B, 0x0B, 0x0E));
+            p.drawText(vis, Qt::AlignCenter, idx < size_t(labels_.size()) ? labels_[qsizetype(idx)] : noteLabel(n.midi));
+        }
     }
 
     // Draw MIDI note labels on the left
     p.setPen(theme::text_muted);
     QFont f = theme::monoFont(9);
     p.setFont(f);
-    static const char* noteNames[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
     for (int midi = midiLow_; midi <= midiHigh_; midi += 12) {
         const int y = height() - static_cast<int>((midi - midiLow_ + 0.5) * pxPerNote_);
-        const int octave = (midi / 12) - 1;
-        p.drawText(4, y + 4, QString("%1%2").arg(noteNames[midi % 12]).arg(octave));
+        p.drawText(4, y + 4, noteLabel(midi));
     }
 }

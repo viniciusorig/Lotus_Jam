@@ -34,6 +34,7 @@ void Tuner::feed(const float* x, size_t n) {
         writePos_ = writePos_ + 1 == N ? 0 : writePos_ + 1;
         if (filled_ < N) ++filled_;
         ++sinceLast_;
+        ++total_;
         // First analysis as soon as the window is full, then one every hop.
         if (filled_ == N && (!primed_ || sinceLast_ >= hop_)) {
             primed_ = true;
@@ -57,6 +58,7 @@ void Tuner::push(const TunerReading& r) {
         --qSize_;
     }
     queue_[(qHead_ + qSize_) % kQueue] = r;
+    queue_[(qHead_ + qSize_) % kQueue].centerFrame = total_ - int64_t(ring_.size() / 2);
     ++qSize_;
 }
 

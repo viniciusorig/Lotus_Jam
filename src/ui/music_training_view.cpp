@@ -1,5 +1,8 @@
 #include "ui/music_training_view.h"
 
+#include <algorithm>
+
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -10,6 +13,7 @@
 #include <QSlider>
 #include <QVBoxLayout>
 
+#include "dsp/bass_mapper.h"
 #include "ui/piano_roll_widget.h"
 #include "ui/theme.h"
 
@@ -78,7 +82,23 @@ MusicTrainingView::MusicTrainingView(QWidget* parent) : QWidget(parent) {
     speedLayout->addWidget(speedLabel_);
     ch->addWidget(field("VELOCIDADE", speedBox, controls));
 
+    tabCheck_ = new QCheckBox(QString::fromUtf8("Corda:casa"), controls);
+    tabCheck_->setToolTip(QString::fromUtf8(
+        "Mostra em cada nota a corda e a casa onde tocá-la. Notas fora da extensão do instrumento são deslocadas por oitavas."));
+    ch->addWidget(tabCheck_);
+
     ch->addStretch(1);
+
+    back_ = new QPushButton(QString::fromUtf8("⏪ 5s"), controls);
+    fwd_ = new QPushButton(QString::fromUtf8("5s ⏩"), controls);
+    back_->setToolTip(QString::fromUtf8("Voltar 5 segundos na música"));
+    fwd_->setToolTip(QString::fromUtf8("Avançar 5 segundos na música"));
+    for (QPushButton* b : {back_, fwd_}) {
+        b->setMinimumWidth(72);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setEnabled(false);
+        ch->addWidget(b, 0, Qt::AlignBottom);
+    }
 
     pause_ = new QPushButton("Pausar", controls);
     pause_->setMinimumWidth(100);
@@ -124,6 +144,9 @@ MusicTrainingView::MusicTrainingView(QWidget* parent) : QWidget(parent) {
     connect(importBtn_, &QPushButton::clicked, this, &MusicTrainingView::onImport);
     connect(trackCombo_, &QComboBox::currentIndexChanged, this, &MusicTrainingView::onTrackChanged);
     connect(speedSlider_, &QSlider::valueChanged, this, &MusicTrainingView::onSpeedChanged);
+    connect(tabCheck_, &QCheckBox::toggled, this, [this] { refreshLabels(); });
+    connect(back_, &QPushButton::clicked, this, [this] { Q_EMIT seekRequested(-5.0); });
+    connect(fwd_, &QPushButton::clicked, this, [this] { Q_EMIT seekRequested(5.0); });
     connect(pause_, &QPushButton::clicked, this, &MusicTrainingView::pauseRequested);
     connect(restart_, &QPushButton::clicked, this, &MusicTrainingView::restartRequested);
     connect(start_, &QPushButton::clicked, this, [this] {
@@ -159,12 +182,16 @@ void MusicTrainingView::loadFile(const QString& path) {
     if (!song_.tracks.empty()) {
         trackCombo_->setCurrentIndex(0);
         onTrackChanged(0);
+        refreshButtons();
         start_->setEnabled(startAllowed_);
         start_->setToolTip(QString::fromUtf8("Iniciar treino com a música"));
         statsLabel_->setText(QString::fromUtf8("Pronto para treinar • %1 notas na trilha selecionada")
                             .arg(song_.tracks[0].notes.size()));
     } else {
         statsLabel_->setText(QString::fromUtf8("Arquivo sem trilhas válidas"));
+        roll_->clear();
+        start_->setEnabled(false);
+        refreshButtons();
     }
 
     Q_EMIT configChanged();
@@ -191,6 +218,7 @@ void MusicTrainingView::onTrackChanged(int index) {
     refreshButtons();
     if (index >= 0 && index < static_cast<int>(song_.tracks.size())) {
         roll_->setSong(song_, index);
+        refreshLabels();
         statsLabel_->setText(QString::fromUtf8("Trilha %1 • %2 notas")
                             .arg(index + 1)
                             .arg(song_.tracks[static_cast<size_t>(index)].notes.size()));
@@ -219,6 +247,43 @@ void MusicTrainingView::refreshButtons() {
     pause_->setText(paused_ ? "Continuar" : "Pausar");
     pause_->setEnabled(running_ || paused_);
     restart_->setEnabled(running_ || paused_);
+    back_->setEnabled(hasSong());
+    fwd_->setEnabled(hasSong());
+}
+
+void MusicTrainingView::setTuning(const Tuning& t) {
+    tuning_ = t;
+    refreshLabels();
+}
+
+// "corda:casa" on each note (the string's letter, with its octave when two strings share one).
+void MusicTrainingView::refreshLabels() {
+    const int i = selectedTrack();
+    if (!tabCheck_->isChecked() || tuning_.strings.empty() || i < 0 || i >= static_cast<int>(song_.tracks.size())) {
+        roll_->setLabels({});
+        return;
+    }
+    QStringList names;
+    bool unique = true;
+    for (int m : tuning_.strings) {
+        QString n = QString::fromStdString(noteName(m));
+        names << n.left(n.size() - 1);
+        unique = unique && names.count(names.last()) == 1;
+    }
+    QStringList labels;
+    for (const Fingering& f : mapToInstrument(song_.tracks[static_cast<size_t>(i)].notes, tuning_)) {
+        const QString s = unique ? names[f.string] : QString::fromStdString(noteName(tuning_.strings[size_t(f.string)]));
+        labels << QString("%1:%2").arg(s).arg(f.fret);
+    }
+    roll_->setLabels(labels);
+}
+
+double MusicTrainingView::songEndSec() const {
+    const int i = selectedTrack();
+    if (i < 0 || i >= static_cast<int>(song_.tracks.size())) return 0.0;
+    double end = 0.0;
+    for (const auto& n : song_.tracks[static_cast<size_t>(i)].notes) end = std::max(end, n.start + n.duration);
+    return end;
 }
 
 void MusicTrainingView::setPaused(bool paused) {

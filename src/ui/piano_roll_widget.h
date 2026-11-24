@@ -1,4 +1,5 @@
 #pragma once
+#include <QStringList>
 #include <QWidget>
 #include <vector>
 
@@ -19,6 +20,9 @@ public:
     // Clear the display.
     void clear();
 
+    // Text on each upcoming note, parallel to the track's notes. Empty = the note names.
+    void setLabels(const QStringList& labels);
+
     // Update the current playback time (call at ~60 Hz).
     void setTime(double nowSec);
 
@@ -28,6 +32,7 @@ public:
     // Accessors for testing
     int noteCount() const { return static_cast<int>(notes_.size()); }
     double currentTime() const { return now_; }
+    void clearResultsFrom(double sec);  // notes starting at or after `sec` become "not played yet"
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -42,6 +47,7 @@ private:
     };
 
     std::vector<DisplayNote> notes_;
+    QStringList labels_;
     double now_ = 0.0;
     double windowBefore_ = 1.0;  // seconds to show before "now"
     double windowAfter_ = 4.0;   // seconds to show after "now"

@@ -147,7 +147,6 @@ MainWindow::MainWindow(BackendFactory factory, DeviceLister lister, QSettings* s
     theme::initResources();
     setWindowTitle("Lotus Jam");
     setWindowIcon(theme::appIcon());
-    events_.reserve(4096);
     buildUi();
     applySettings();
 
@@ -342,6 +341,26 @@ void MainWindow::buildUi() {
             music_->setPaused(true);
         }
     });
+    // Seek: running -> stop and restart from the new position; otherwise just move the resume
+    // position (the button then reads "Continuar"). Notes after the target are scored again.
+    connect(music_, &MusicTrainingView::seekRequested, this, [this](double delta) {
+        if (starting_ || !music_->hasSong()) return;
+        const bool wasRunning = running_ && sessMode_ == Mode::Music;
+        if (running_ && !wasRunning) return;  // another tab's session
+        const double from = wasRunning ? std::max(0.0, music_->pianoRoll()->currentTime())
+                            : music_->isPaused() ? musicPauseSec_ : 0.0;
+        const double target = std::clamp(from + delta, 0.0, music_->songEndSec());
+        if (wasRunning) stopSession();
+        music_->pianoRoll()->clearResultsFrom(target);
+        music_->pianoRoll()->setTime(target);
+        if (wasRunning) {
+            musicResumeSec_ = target;
+            startSession(Mode::Music);
+        } else {
+            musicPauseSec_ = target;
+            music_->setPaused(true);
+        }
+    });
     connect(music_, &MusicTrainingView::restartRequested, this, [this] {
         if (running_ && sessMode_ == Mode::Music) stopSession();
         if (!running_ && !starting_) startSession(Mode::Music);
@@ -371,6 +390,7 @@ void MainWindow::buildUi() {
     connect(tempo_->countInCombo(), &QComboBox::currentIndexChanged, this, &MainWindow::scheduleSave);
     connect(tempo_->subdivisionCombo(), &QComboBox::currentIndexChanged, this, &MainWindow::scheduleSave);
     connect(tuner_, &TunerWidget::configChanged, this, &MainWindow::scheduleSave);
+    connect(tuner_, &TunerWidget::configChanged, this, [this] { music_->setTuning(tuner_->tuning()); });
     saveTimer_.setSingleShot(true);
     saveTimer_.setInterval(kSaveDebounceMs);
     connect(&saveTimer_, &QTimer::timeout, this, &MainWindow::persistSettings);
@@ -724,8 +744,10 @@ void MainWindow::recordSample() {
 
 void MainWindow::poll() {
     if (starting_ || !session_) return;
-    events_.clear();
-    if (session_->pollEvents(events_)) dispatchEvents(events_);
+    // Local: dispatching may run a nested event loop (the save dialog of a transcription) that
+    // calls poll() again, which must not clear the vector being iterated.
+    std::vector<UiEvent> events;
+    if (session_->pollEvents(events)) dispatchEvents(events);
     if (recPending_ && running_ && backend_ && backend_->nowSec() >= recDeadline_) {
         recPending_ = false;
         tempo_->setRecordingState(recError_ ? TempoTrainingView::Rec::Failed : TempoTrainingView::Rec::Saved, recPath_);
@@ -890,6 +912,7 @@ void MainWindow::applySettings() {
         tuner_->tuningCombo()->setCurrentIndex(i);
     tuner_->a4Spin()->setValue(v.a4);
     comp_->setValue(v.compensationMs);  // the saved pair's (reloaded once the devices are known)
+    music_->setTuning(tuner_->tuning());
     applying_ = false;
     saveTimer_.stop();  // loading is not a change
 }

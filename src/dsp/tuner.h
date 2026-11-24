@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include "dsp/notes.h"
@@ -11,6 +12,7 @@ struct TunerReading {
     int stringIndex;  // index into Tuning::strings; -1 when not voiced (other fields 0)
     double hz, targetHz, cents;
     int midi = -1;  // chromatic mode: the nearest note (MIDI number); -1 in string mode
+    int64_t centerFrame = 0;  // input frame at the centre of the analysed window
 };
 
 // Tuner service for the analysis thread (single-threaded). Keeps a sliding window of the
@@ -50,6 +52,7 @@ private:
     std::vector<float> ring_;    // circular sliding window, size N = requiredSamples
     std::vector<float> linear_;  // unrolled copy handed to Yin
     size_t writePos_ = 0, filled_ = 0, sinceLast_ = 0;
+    int64_t total_ = 0;  // frames fed so far
     bool primed_ = false;
 
     // The first voiced reading right after a quiet window must be confirmed by the next one (within 50 cents)

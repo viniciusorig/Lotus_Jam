@@ -154,7 +154,6 @@ private:
     bool tunerRestart_ = false;  // tuner config changed: restart the running tuner session
     bool reconciling_ = false;
     unsigned tunerGen_ = 0, sessTunerGen_ = 0;  // config generation (stale readings dropped)
-    std::vector<UiEvent> events_;
 
     std::thread listThread_, startThread_;
     std::mutex handoff_;  // guards the two results below (helper thread -> UI thread)
